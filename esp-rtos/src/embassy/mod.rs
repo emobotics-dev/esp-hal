@@ -132,6 +132,16 @@ pub trait Callbacks {
     fn on_idle(&mut self);
 }
 
+
+/// No-op Callbacks implementation, internally used by the rtos_main! macro.
+pub struct NoCallbacks;
+
+impl Callbacks for NoCallbacks {
+    fn before_poll(&mut self) {debug!("before_poll");}
+    fn on_idle(&mut self) {debug!("on_idle");}
+}
+
+
 /// Thread-mode executor.
 ///
 /// This executor runs in an OS thread, meaning the scheduler needs to be started before using any

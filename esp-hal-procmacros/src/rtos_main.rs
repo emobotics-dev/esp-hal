@@ -8,8 +8,9 @@ use syn::{
     ReturnType,
     Token,
     Type,
-    parse::{Parse, ParseBuffer},
+    parse::{Error as SynError, Parse, ParseBuffer},
     punctuated::Punctuated,
+    spanned::Spanned,
 };
 
 /// Parsed arguments for the `main` macro.
@@ -31,7 +32,38 @@ pub fn main(args: TokenStream, item: TokenStream) -> TokenStream {
     let args: Args = crate::unwrap_or_compile_error!(syn::parse2(args));
     let f: syn::ItemFn = crate::unwrap_or_compile_error!(syn::parse2(item));
 
-    run(&args.meta, f, main_fn()).unwrap_or_else(|x| x)
+    let mut callbacks = None;
+    for arg in &args.meta {
+        match arg {
+            Meta::NameValue(meta_name_value) => {
+                if meta_name_value.path.is_ident("callbacks") {
+                    if callbacks.is_some() {
+                        return SynError::new(
+                            meta_name_value.span(),
+                            "duplicate `callbacks` attribute",
+                        ).into_compile_error().into();
+                    }
+                    callbacks = Some(meta_name_value.value.clone());
+                } else {
+                    return SynError::new(meta_name_value.span(), "expected `callbacks = <value>`")
+                        .into_compile_error().into();
+                }
+            }
+            other => {
+                return SynError::new(other.span(), "expected `callbacks = <value>`")
+                    .into_compile_error().into();
+            }
+        }
+    }
+
+    let callbacks = match callbacks {
+        Some(ref callbacks) => quote::quote!( {
+            #callbacks
+        } ),
+        _ => quote::quote!( { esp_rtos::embassy::NoCallbacks {} }),
+    };
+
+    run(&args.meta, f, main_fn(callbacks)).unwrap_or_else(|x| x)
 }
 
 /// Expands and validates the async `main` function into a task entry point.
@@ -178,7 +210,7 @@ impl Drop for Ctxt {
 }
 
 /// Generates the `main` function that initializes and runs the async executor.
-pub fn main_fn() -> TokenStream2 {
+pub fn main_fn(callbacks: TokenStream2) -> TokenStream2 {
     let root = match proc_macro_crate::crate_name("esp-hal") {
         Ok(proc_macro_crate::FoundCrate::Name(ref name)) => quote::format_ident!("{name}"),
         _ => quote::format_ident!("esp_hal"),
@@ -189,9 +221,9 @@ pub fn main_fn() -> TokenStream2 {
         fn main() -> ! {
             let mut executor = ::esp_rtos::embassy::Executor::new();
             let executor = unsafe { __make_static(&mut executor) };
-            executor.run(|spawner| {
+            executor.run_with_callbacks(|spawner| {
                 spawner.must_spawn(__embassy_main(spawner));
-            })
+            }, #callbacks)
         }
     }
 }
