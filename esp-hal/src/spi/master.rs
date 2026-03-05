@@ -2262,6 +2262,29 @@ mod dma {
             Ok(())
         }
 
+        /// Zero-copy write using caller's DMA buffer directly.
+        ///
+        /// Unlike [`write_async`](Self::write_async), this does not copy data
+        /// into an internal buffer — the DMA reads from `buf` directly.
+        #[instability::unstable]
+        pub async fn write_dma_buf<TX: DmaTxBuffer>(
+            &mut self,
+            len: usize,
+            buf: &mut TX,
+        ) -> Result<(), Error> {
+            self.spi_dma.wait_for_idle_async().await;
+            self.spi_dma.driver().setup_full_duplex()?;
+
+            let mut spi = DropGuard::new(&mut self.spi_dma, |spi| spi.cancel_transfer());
+
+            unsafe { spi.start_dma_transfer(0, len, &mut EmptyBuf, buf)? };
+
+            spi.wait_for_idle_async().await;
+            spi.defuse();
+
+            Ok(())
+        }
+
         /// Transfer by writing out a buffer and reading the response from
         /// the bus into another buffer.
         #[instability::unstable]
