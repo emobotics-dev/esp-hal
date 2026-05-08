@@ -2,6 +2,7 @@ use core::{
     cell::{Cell, UnsafeCell},
     cmp::min,
     mem::{ManuallyDrop, MaybeUninit},
+    ptr::NonNull,
     sync::atomic::{Ordering, fence},
 };
 
@@ -23,8 +24,10 @@ use crate::{
         DmaTxBuffer,
         PeripheralDmaChannel,
         asynch::DmaRxFuture,
+        prepare_for_tx,
     },
     private::DropGuard,
+    soc::is_slice_in_dram,
     spi::DmaError,
 };
 
@@ -926,25 +929,97 @@ impl<'d> SpiDmaBus<'d, Async> {
     }
 
     /// Transmit the given buffer to the bus.
+    ///
+    /// Tries a zero-copy DMA path when the slice lives in DRAM and (on ESP32)
+    /// is 4-byte aligned in address and length. Otherwise copies through
+    /// `tx_buf` — the same fallback upstream #5290 uses for ESP32 PDMA.
     #[instability::unstable]
     pub async fn write_async(&mut self, words: &[u8]) -> Result<(), Error> {
+        if words.is_empty() {
+            return Ok(());
+        }
+
         self.spi_dma.wait_for_idle_async().await;
         self.spi_dma.driver().setup_full_duplex()?;
 
         let empty_rx_buffer = unsafe { self.spi_dma.dma_driver().empty_rx_buffer() };
 
+        // Stack descriptor count: enough to chain MAX_DMA_SIZE bytes at the
+        // worst-case 4-byte alignment (chunk = 4096 - 4 = 4092). +2 for slop.
+        const ZC_DESC_COUNT: usize = MAX_DMA_SIZE.div_ceil(4092) + 2;
+
+        // Zero-copy path: caller's buffer is in DRAM. On ESP32 PDMA, a
+        // descriptor length that is not a 4-byte multiple wedges TransferDone
+        // — same rule as upstream #5290, so copy through `tx_buf` instead of
+        // rounding the descriptor length (that reads past the slice) or a
+        // pad-descriptor chain.
+        let zero_copy = is_slice_in_dram(words) && {
+            #[cfg(esp32)]
+            {
+                (words.as_ptr() as usize).is_multiple_of(4) && words.len().is_multiple_of(4)
+            }
+            #[cfg(not(esp32))]
+            {
+                true
+            }
+        };
+        if zero_copy {
+            let mut offset = 0;
+            while offset < words.len() {
+                let remaining = &words[offset..];
+                let mut descriptors = [DmaDescriptor::EMPTY; ZC_DESC_COUNT];
+                match unsafe {
+                    prepare_for_tx(
+                        &mut descriptors,
+                        NonNull::from(remaining),
+                        1,
+                    )
+                } {
+                    Ok((mut tx_buf, transferred)) => {
+                        let mut spi = DropGuard::new(
+                            &mut self.spi_dma,
+                            |spi| spi.cancel_transfer(),
+                        );
+                        unsafe {
+                            spi.start_dma_transfer(
+                                0,
+                                transferred,
+                                empty_rx_buffer,
+                                &mut tx_buf,
+                            )?;
+                        }
+                        spi.wait_for_idle_async().await;
+                        spi.defuse();
+                        offset += transferred;
+                    }
+                    Err(_) => break, // alignment mismatch — fall back below
+                }
+            }
+            if offset == words.len() {
+                return Ok(());
+            }
+            // Partial zero-copy + copy fallback for the remainder.
+            let words = &words[offset..];
+            return self.write_async_copy(words, empty_rx_buffer).await;
+        }
+
+        // Copy path (full).
+        self.write_async_copy(words, empty_rx_buffer).await
+    }
+
+    async fn write_async_copy(
+        &mut self,
+        words: &[u8],
+        empty_rx_buffer: &'static mut DmaRxBuf,
+    ) -> Result<(), Error> {
         let mut spi = DropGuard::new(&mut self.spi_dma, |spi| spi.cancel_transfer());
         let chunk_size = self.tx_buf.capacity();
-
         for chunk in words.chunks(chunk_size) {
             self.tx_buf.as_mut_slice()[..chunk.len()].copy_from_slice(chunk);
-
             unsafe { spi.start_dma_transfer(0, chunk.len(), empty_rx_buffer, &mut self.tx_buf)? };
-
             spi.wait_for_idle_async().await;
         }
         spi.defuse();
-
         Ok(())
     }
 
