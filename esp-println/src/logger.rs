@@ -84,12 +84,12 @@ fn print_log_record(record: &log::Record) {
 
     #[cfg(feature = "timestamp")]
     println!(
-        "{}{} ({}) - {}{}",
+        "[{:09.3} {}{}{} ] {}",
+        unsafe { _esp_println_timestamp() as f32 / 1000. },
         color,
         record.level(),
-        unsafe { _esp_println_timestamp() },
+        reset,
         record.args(),
-        reset
     );
     #[cfg(not(feature = "timestamp"))]
     println!("{}{} - {}{}", color, record.level(), record.args(), reset);
