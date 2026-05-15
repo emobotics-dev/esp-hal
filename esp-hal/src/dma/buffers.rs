@@ -1680,7 +1680,17 @@ pub(crate) unsafe fn prepare_for_tx(
     // TODO: it would be best if this function returned the amount of data that could be linked
     // up.
     unwrap!(descriptors.link_with_buffer(unsafe { data.as_mut() }, chunk_size));
-    unwrap!(descriptors.set_tx_length(data_len, chunk_size));
+    // ESP32 LX6 PDMA quirk: SPI peripheral's TransferDone IRQ never fires when
+    // the descriptor's `length` field is not a 4-byte multiple. Round it up;
+    // MOSI_DBITLEN is set separately to the exact bit count (`configure_datalen`),
+    // so the wire transfer stops at the real data boundary and the 1-3 trailing
+    // bytes are read by DMA but never clocked out. Matches ESP-IDF spi_master.c
+    // semantics (`spicommon_dma_desc_setup_link` + exact `usr_mosi_dbitlen`).
+    #[cfg(esp32)]
+    let descriptor_len = (data_len + 3) & !3;
+    #[cfg(not(esp32))]
+    let descriptor_len = data_len;
+    unwrap!(descriptors.set_tx_length(descriptor_len, chunk_size));
 
     for desc in descriptors.linked_iter_mut() {
         desc.reset_for_tx(desc.next.is_null());
@@ -1699,6 +1709,116 @@ pub(crate) unsafe fn prepare_for_tx(
             accesses_psram: data_in_psram,
         }),
         data_len,
+    ))
+}
+
+/// Like `prepare_for_tx`, but appends a 4-byte caller-owned `pad` descriptor
+/// to the chain when `data.len() % 4 != 0`. The 1-3 unaligned tail bytes of
+/// `data` are copied into the head of `pad`; the DMA streams `bulk + pad` as a
+/// single chain with no clock gap, while the caller programs the peripheral
+/// (e.g. SPI `MOSI_DBITLEN`) to stop the wire transfer at the real byte
+/// boundary — the 1-3 trailing zero-pad bytes are read by DMA but never
+/// clocked out. ESP32-only path; on aligned inputs falls through to the
+/// regular `prepare_for_tx` (no pad descriptor added).
+///
+/// # Safety
+///
+/// Same as `prepare_for_tx`. Additionally, `pad` must outlive the DMA transfer
+/// (it is referenced by the descriptor chain).
+#[cfg(esp32)]
+#[cfg_attr(not(spi_master_supports_dma), expect(unused))]
+pub(crate) unsafe fn prepare_for_tx_with_pad(
+    descriptors: &mut [DmaDescriptor],
+    data: NonNull<[u8]>,
+    pad: &mut [u8; 4],
+    block_size: usize,
+) -> Result<(NoBuffer, usize), DmaError> {
+    let alignment =
+        BurstConfig::DEFAULT.min_alignment(unsafe { data.as_ref() }, TransferDirection::Out);
+
+    if !data.addr().get().is_multiple_of(alignment) {
+        return Err(DmaError::InvalidAlignment(DmaAlignmentError::Address));
+    }
+
+    let total_len = data.len();
+    let bulk_len = total_len & !3;
+    let tail_len = total_len - bulk_len;
+
+    // Aligned input — nothing to pad; delegate to the regular helper.
+    if tail_len == 0 {
+        return unsafe { prepare_for_tx(descriptors, data, block_size) };
+    }
+
+    // Copy the 1-3 unaligned tail bytes into pad[..tail_len]; zero the rest.
+    *pad = [0u8; 4];
+    pad[..tail_len].copy_from_slice(unsafe {
+        core::slice::from_raw_parts(data.as_ptr().cast::<u8>().add(bulk_len), tail_len)
+    });
+
+    let alignment = alignment.max(block_size);
+    let chunk_size = 4096 - alignment;
+
+    // Pad always occupies one extra descriptor; bulk needs at least one even when
+    // bulk_len == 0 (caller-padded short transfers). We require at least 2 descs.
+    let bulk_desc_count = if bulk_len == 0 {
+        0
+    } else {
+        bulk_len.div_ceil(chunk_size)
+    };
+    if descriptors.len() < bulk_desc_count + 1 {
+        return Err(DmaError::OutOfDescriptors);
+    }
+
+    cfg_if::cfg_if! {
+        if #[cfg(dma_can_access_psram)] {
+            let data_addr = data.addr().get();
+            let data_in_psram = crate::psram::psram_range().contains(&data_addr);
+            if data_in_psram {
+                unsafe { crate::soc::cache_writeback_addr(data_addr as u32, bulk_len as u32) };
+            }
+            // pad always lives in DRAM (caller stack).
+        }
+    }
+
+    // Set up bulk descriptors (if any) via the existing helper.
+    if bulk_len > 0 {
+        let bulk_slice = unsafe {
+            core::slice::from_raw_parts_mut(data.as_ptr().cast::<u8>(), bulk_len)
+        };
+        let mut bulk_set =
+            unwrap!(DescriptorSet::new(&mut descriptors[..bulk_desc_count]));
+        unwrap!(bulk_set.link_with_buffer(bulk_slice, chunk_size));
+        unwrap!(bulk_set.set_tx_length(bulk_len, chunk_size));
+        for desc in bulk_set.linked_iter_mut() {
+            desc.reset_for_tx(false); // suc_eof cleared — pad is last.
+        }
+    }
+
+    // Append pad descriptor.
+    let pad_desc = &mut descriptors[bulk_desc_count];
+    pad_desc.buffer = pad.as_mut_ptr();
+    pad_desc.set_size(4);
+    pad_desc.set_length(4);
+    pad_desc.reset_for_tx(true); // suc_eof = true (chain terminator)
+    pad_desc.next = core::ptr::null_mut();
+
+    // Wire the bulk-tail descriptor (if present) to point at the pad.
+    if bulk_desc_count > 0 {
+        let pad_ptr = &mut descriptors[bulk_desc_count] as *mut DmaDescriptor;
+        descriptors[bulk_desc_count - 1].next = pad_ptr;
+    }
+
+    Ok((
+        NoBuffer(Preparation {
+            start: &mut descriptors[0],
+            direction: TransferDirection::Out,
+            burst_transfer: BurstConfig::DEFAULT,
+            check_owner: None,
+            auto_write_back: false,
+            #[cfg(dma_can_access_psram)]
+            accesses_psram: data_in_psram,
+        }),
+        total_len,
     ))
 }
 
