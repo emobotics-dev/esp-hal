@@ -28,6 +28,8 @@ use crate::{
     soc::is_slice_in_dram,
     spi::DmaError,
 };
+#[cfg(esp32)]
+use crate::dma::prepare_for_tx_with_pad;
 
 const MAX_DMA_SIZE: usize = 32736;
 
@@ -933,6 +935,15 @@ impl<'d> SpiDmaBus<'d, Async> {
     /// caller's buffer directly, and no copy into `tx_buf` is performed. Falls
     /// back to the chunked-copy path through `tx_buf` when zero-copy isn't
     /// applicable (e.g. flash-resident `&str` literals).
+    ///
+    /// ESP32 (LX6 / PDMA) unaligned handling: SPI PDMA TX wedges if the
+    /// descriptor byte count is not a 4-byte multiple. When the slice is
+    /// unaligned, a single chained descriptor list is built: the bulk
+    /// (4-aligned prefix, possibly zero) followed by a 4-byte stack-padded
+    /// tail descriptor. The DMA streams `bulk + pad` as one continuous burst
+    /// — no clock gap mid-transfer — and SPI's `MOSI_DBITLEN` is programmed
+    /// to the exact bit count, so the 1-3 zero-pad bytes are read by DMA but
+    /// never clocked to the slave.
     #[instability::unstable]
     pub async fn write_async(&mut self, words: &[u8]) -> Result<(), Error> {
         if words.is_empty() {
@@ -945,24 +956,44 @@ impl<'d> SpiDmaBus<'d, Async> {
         let empty_rx_buffer = unsafe { self.spi_dma.dma_driver().empty_rx_buffer() };
 
         // Stack descriptor count: enough to chain MAX_DMA_SIZE bytes at the
-        // worst-case 4-byte alignment (chunk = 4096 - 4 = 4092). +2 for slop.
-        const ZC_DESC_COUNT: usize = MAX_DMA_SIZE.div_ceil(4092) + 2;
+        // worst-case 4-byte alignment (chunk = 4096 - 4 = 4092). +2 for slop,
+        // +1 to leave room for an appended tail-pad descriptor on ESP32.
+        const ZC_DESC_COUNT: usize = MAX_DMA_SIZE.div_ceil(4092) + 3;
 
-        // Zero-copy path: caller's buffer is in DRAM. `prepare_for_tx` checks
-        // alignment and either returns descriptors pointing at the slice or an
-        // alignment error (in which case we fall through to the copy path).
+        // ESP32-only: caller-owned 4-byte pad buffer for the unaligned tail.
+        // Must be word-aligned (ESP32 PDMA buffer-address requirement); use
+        // `[u32; 1]` to force 4-byte alignment, then view as `[u8; 4]` via
+        // cast. Lives for the whole function (and any await within), so the
+        // DMA descriptor chain can reference it safely.
+        #[cfg(esp32)]
+        let mut pad_word = [0u32; 1];
+        #[cfg(esp32)]
+        // SAFETY: u32 has the same size and stricter alignment than [u8; 4].
+        let pad: &mut [u8; 4] = unsafe { &mut *pad_word.as_mut_ptr().cast::<[u8; 4]>() };
+
+        // Zero-copy path: caller's buffer is in DRAM. The unaligned tail (if
+        // any) gets chained as an extra descriptor pointing at `pad`.
         if is_slice_in_dram(words) {
             let mut offset = 0;
             while offset < words.len() {
                 let remaining = &words[offset..];
                 let mut descriptors = [DmaDescriptor::EMPTY; ZC_DESC_COUNT];
-                match unsafe {
-                    prepare_for_tx(
+
+                #[cfg(esp32)]
+                let prep = unsafe {
+                    prepare_for_tx_with_pad(
                         &mut descriptors,
                         NonNull::from(remaining),
+                        pad,
                         1,
                     )
-                } {
+                };
+                #[cfg(not(esp32))]
+                let prep = unsafe {
+                    prepare_for_tx(&mut descriptors, NonNull::from(remaining), 1)
+                };
+
+                match prep {
                     Ok((mut tx_buf, transferred)) => {
                         let mut spi = DropGuard::new(
                             &mut self.spi_dma,
@@ -987,11 +1018,10 @@ impl<'d> SpiDmaBus<'d, Async> {
                 return Ok(());
             }
             // Partial zero-copy + copy fallback for the remainder.
-            let words = &words[offset..];
-            return self.write_async_copy(words, empty_rx_buffer).await;
+            return self.write_async_copy(&words[offset..], empty_rx_buffer).await;
         }
 
-        // Copy path (full).
+        // Copy path (full): for non-DRAM slices (e.g. flash literals).
         self.write_async_copy(words, empty_rx_buffer).await
     }
 
