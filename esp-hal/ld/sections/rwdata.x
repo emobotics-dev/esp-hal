@@ -38,6 +38,30 @@ _sidata = LOADADDR(.data);
 {
   _bss_start = ABSOLUTE(.);
   . = ALIGN (4);
+
+  /* ESP32 BLE/PHY blobs need stable addresses across user-`.bss` growth.
+     Pin them first inside `.bss`. Other chips have no such blobs here;
+     leaving the rules ungated shifted `.bss` layout on every target. */
+#IF esp32
+  _bss_radio_start = ABSOLUTE(.);
+  *libbtdm_app.a:*(.sbss .sbss.* .bss .bss.* COMMON)
+  *libcoexist.a:*(.sbss .sbss.* .bss .bss.* COMMON)
+  *libcore.a:*(.sbss .sbss.* .bss .bss.* COMMON)
+  *libespnow.a:*(.sbss .sbss.* .bss .bss.* COMMON)
+  *libmesh.a:*(.sbss .sbss.* .bss .bss.* COMMON)
+  *libnet80211.a:*(.sbss .sbss.* .bss .bss.* COMMON)
+  *libphy.a:*(.sbss .sbss.* .bss .bss.* COMMON)
+  *libpp.a:*(.sbss .sbss.* .bss .bss.* COMMON)
+  *libprintf.a:*(.sbss .sbss.* .bss .bss.* COMMON)
+  *libregulatory.a:*(.sbss .sbss.* .bss .bss.* COMMON)
+  *librtc.a:*(.sbss .sbss.* .bss .bss.* COMMON)
+  *libsmartconfig.a:*(.sbss .sbss.* .bss .bss.* COMMON)
+  *libwapi.a:*(.sbss .sbss.* .bss .bss.* COMMON)
+  *libwpa_supplicant.a:*(.sbss .sbss.* .bss .bss.* COMMON)
+  . = ALIGN(4);
+  _bss_radio_end = ABSOLUTE(.);
+#ENDIF
+
   *(.dynsbss)
   *(.sbss)
   *(.sbss.*)
@@ -51,6 +75,7 @@ _sidata = LOADADDR(.data);
   *(.share.mem)
   *(.gnu.linkonce.b.*)
   *(COMMON)
+
   _bss_end = ABSOLUTE(.);
   . = ALIGN(4);
 } > RWDATA
