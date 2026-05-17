@@ -42,6 +42,17 @@ options:
     active: "true"
     stability: !Stable "1.0.0"
 
+  - name: main-stack-min-size
+    description: >-
+      Compile-time assertion (esp32 only): build fails if the main task stack region
+      (top of RWDATA minus end of .bss/.noinit) would be smaller than this many bytes.
+      Default 0 = no assertion. Fork equivalent of upstream `ensure-main-stack-minimum`
+      (#6139); kept under this name so existing ESP_HAL_CONFIG_MAIN_STACK_MIN_SIZE
+      consumers keep working. Needs to be a multiple of 4.
+    default:
+      - value: 0
+    active: "true"
+
   - name: stack-guard-value
     description: The value to be written to the stack guard variable.
     default:
