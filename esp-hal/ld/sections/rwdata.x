@@ -89,6 +89,7 @@ _sidata = LOADADDR(.data);
   *(.share.mem)
   *(.gnu.linkonce.b.*)
   *(COMMON)
+
   _bss_end = ABSOLUTE(.);
   . = ALIGN(4);
 } > RWDATA
