@@ -17,3 +17,17 @@ SECTIONS {
     _stack_start_cpu0 = ABSOLUTE(.);
   } > RWDATA
 }
+
+/* Lower bound only — matches upstream #6139 (`ensure-main-stack-minimum`).
+   An upper bound is an application DRAM-layout lock, not a HAL primitive.
+   Scoped to esp32: the BLE-blob hang it guards is ESP32-specific, and
+   other chips inheriting the env from a workspace .cargo/config.toml
+   would false-positive. Default 0 disables the check. */
+#IF esp32
+ASSERT(
+  ${ESP_HAL_CONFIG_MAIN_STACK_MIN_SIZE} == 0
+    || (_stack_start_cpu0 - _stack_end_cpu0) >= ${ESP_HAL_CONFIG_MAIN_STACK_MIN_SIZE},
+  "main task stack region is smaller than ESP_HAL_CONFIG_MAIN_STACK_MIN_SIZE — \
+reduce .bss/.noinit usage or lower the configured minimum"
+);
+#ENDIF
