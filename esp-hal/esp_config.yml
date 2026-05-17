@@ -42,6 +42,32 @@ options:
     active: "true"
     stability: !Stable "1.0.0"
 
+  - name: main-stack-min-size
+    description: >-
+      Compile-time assertion: build fails if the main task stack region (top of RWDATA
+      minus end of .bss/.noinit) would be smaller than this many bytes. Default 0 = no
+      assertion. Set to a defensive value (e.g. 28672 for ESP32 + BLE) so user `.bss`
+      growth that would shrink the main stack below the BLE-init safe budget is caught
+      at link time instead of silently hanging the chip at boot. Needs to be a multiple of 4.
+    default:
+      - value: 0
+    active: "true"
+    stability: !Stable "1.0.0"
+
+  - name: main-stack-max-size
+    description: >-
+      Compile-time assertion: build fails if the main task stack region (top of RWDATA
+      minus end of .bss/.noinit) would be LARGER than this many bytes. Default 0 = no
+      assertion. The companion of `main-stack-min-size`: shrinking user `.bss` grows the
+      main task stack region, and on ESP32 + BLE a stack region wider than the
+      empirically validated range can silently hang BLE controller init. Setting a max
+      (e.g. 30000 for ESP32 + BLE) catches an over-shrink at link time. Needs to be a
+      multiple of 4.
+    default:
+      - value: 0
+    active: "true"
+    stability: !Stable "1.0.0"
+
   - name: stack-guard-value
     description: The value to be written to the stack guard variable.
     default:
