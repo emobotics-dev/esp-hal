@@ -35,7 +35,22 @@ pub unsafe fn set_stack_watchpoint(addr: usize) {
         cfg_if::cfg_if! {
             if #[cfg(xtensa)] {
                 let addr = addr & !0b11;
-                let dbreakc = 0b1111100 | (1 << 31); // bit 31 = STORE
+                // DBREAKC: bit 31 = STORE, bits 5..0 = mask (low address bits
+                // to ignore in compare). Valid masks per Xtensa LX ISA are
+                // 0/1/3/7/15/31/63 (1/2/4/8/16/32/64-byte windows). 0b11 = 4
+                // bytes, the smallest match that covers the full word-aligned
+                // guard u32 starting at `addr & !0b11`. Previously this value
+                // was 0b1111100 which has gaps in the mask (bits 2..5 set,
+                // bits 0,1 clear) — that's outside the valid set and on LX6
+                // the hardware behaves as if a wider, non-contiguous range
+                // were watched, firing on stores to addresses 40–100 bytes
+                // above _stack_end even when SP is far above the guard. Real
+                // stack-overflow detection is preserved by 0b11 since a push
+                // that reaches the guard word still triggers; false-positives
+                // from unrelated stack-region writes (e.g. a panic handler
+                // frame writing to the watched window during the recursive
+                // exception path) are eliminated.
+                let dbreakc = 0b11 | (1u32 << 31);
 
                 unsafe {
                     core::arch::asm!(
