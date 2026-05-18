@@ -29,12 +29,22 @@ MEMORY
   /*
   *   The following values are derived from the __stack and _stack_sentry values from ROM.
   *   They represent the stacks used for each core setup by ROM code. In theory both of these
-  *   can be reclaimed once both cores are running, but for now we play it safe and reserve them both.
+  *   can be reclaimed once both cores are running, but for now we play it safe and reserve
+  *   reserved_rom_stack_pro (which the PRO core may still use during early-boot code paths).
+  *
+  *   reserved_rom_stack_app HAS been reclaimed and merged into dram2_seg below: the APP-core
+  *   ROM stack is only used by ROM code that runs before the app-core entry-point hands
+  *   control to our `start_app_core` callback; from that point on the APP core uses our
+  *   own `Stack::<N>` allocation, and the ROM-reserved area is dead memory we want to
+  *   recover for the heap / `.dram2_uninit` section. Fire27 needs ~11 KiB more in
+  *   dram2_seg to fit LVGL_BUFS (`#[link_section = ".dram2_uninit"]`) alongside the
+  *   50 KiB heap that the BLE controller requires.
   */
   reserved_rom_stack_pro  : ORIGIN = 0x3ffe1320, len = 11264
-  reserved_rom_stack_app  : ORIGIN = 0x3ffe5230, len = 11264
 
-  dram2_seg              : ORIGIN = 0x3ffe7e30, len = 98768  /* the rest of DRAM after the rom data segments and rom stacks in the middle */
+  /* dram2_seg now starts where reserved_rom_stack_app used to and extends through the
+     end of DRAM, gaining 11 264 bytes (rom_stack_app) of usable heap/uninit space. */
+  dram2_seg              : ORIGIN = 0x3ffe5230, len = 110032  /* was: 0x3ffe7e30, len 98768 */
 
   /* external flash
      The 0x20 offset is a convenience for the app binary image generation.
