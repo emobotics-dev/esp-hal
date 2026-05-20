@@ -18,27 +18,43 @@ unsafe extern "C" fn __user_exception(
 #[cfg(all(xtensa, stack_guard_monitoring))]
 pub(crate) fn breakpoint_interrupt(context: &TrapFrame) {
     let mut dbgcause: u32;
+    let mut dbreaka0: u32;
+    let mut dbreakc0: u32;
     unsafe {
         core::arch::asm!(
             "rsr.debugcause {0}",
-            out(reg) dbgcause, options(nostack)
+            "rsr {1}, 144",   // DBREAKA0 = SR 144
+            "rsr {2}, 160",   // DBREAKC0 = SR 160
+            out(reg) dbgcause,
+            out(reg) dbreaka0,
+            out(reg) dbreakc0,
+            options(nostack)
         );
     }
 
     #[cfg(stack_guard_monitoring)]
     if dbgcause & 4 != 0 && dbgcause & 0b1111_0000_0000 == 0 {
+        // Watchpoint trip: DBREAKA0 holds the watched address (the current
+        // task's stack-guard); compare context.A1 to infer how deep that
+        // task was when its guard got written.
         panic!(
-            "\n\nDetected a write to the stack guard value on {:?}\n{:?}",
+            "\n\nDetected a write to the stack guard value on {:?}\nDBREAKA0=0x{:08x} DBREAKC0=0x{:08x} task_sp=0x{:08x} sp_to_guard={}\n{:?}",
             crate::system::Cpu::current(),
+            dbreaka0,
+            dbreakc0,
+            context.A1,
+            context.A1.wrapping_sub(dbreaka0) as i32,
             context
         );
     }
 
     panic!(
-        "\n\nBreakpoint on {:?}\n{:?}\nDebug cause: {}",
+        "\n\nBreakpoint on {:?}\n{:?}\nDebug cause: {} DBREAKA0=0x{:08x} DBREAKC0=0x{:08x}",
         crate::system::Cpu::current(),
         context,
-        dbgcause
+        dbgcause,
+        dbreaka0,
+        dbreakc0,
     );
 }
 
