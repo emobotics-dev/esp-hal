@@ -21,6 +21,12 @@ unsafe fn malloc_with_caps(
         );
 
         if ptr.is_null() {
+            ::log::error!(
+                "[esp-alloc] OOM: request={} bytes (+4 hdr), used={} free={}",
+                size,
+                crate::HEAP.used(),
+                crate::HEAP.free(),
+            );
             return ptr;
         }
 
