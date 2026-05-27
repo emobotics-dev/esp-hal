@@ -1142,9 +1142,26 @@ where
     }
 
     fn internal_recover(&self, error: &Error) {
-        // Timeout errors mean our hardware is (possibly) working when it gets reset. Clear the bus
-        // in this case, to prevent leaving the I2C device mid-transfer.
-        self.driver().reset_fsm(*error == Error::Timeout)
+        // Recovery strategy per error class:
+        //  - Timeout: clear the bus (9 SCL pulses) AND reset the FSM. The
+        //    slave may be holding SDA mid-byte and the controller may have
+        //    consumed only part of our command list.
+        //  - AcknowledgeCheckFailed: the slave responded with NACK (or wasn't
+        //    there). The controller cleanly observed the NACK and is back to
+        //    idle — no recovery needed. We deliberately SKIP `do_fsm_reset`
+        //    here because that helper calls `PeripheralClockControl::reset`
+        //    on ESP32 (no reliable_fsm_reset), which is a chip-wide
+        //    system-register write. Repeated NACKs at a few-Hz cadence (e.g.
+        //    PPS task polling an absent sensor) thereby produced a stream of
+        //    peripheral-clock resets that desync'd the BLE controller blob —
+        //    root cause of the fire27 "stops emitting at PPS-stop" wedge.
+        //    Other errors (FifoExceeded, ArbitrationLost, ZeroLengthInvalid,
+        //    ExecIncomplete) fall through to a plain FSM reset.
+        match error {
+            Error::Timeout => self.driver().reset_fsm(true),
+            Error::AcknowledgeCheckFailed(_) => { /* no recovery needed */ }
+            _ => self.driver().reset_fsm(false),
+        }
     }
 
     #[procmacros::doc_replace]
