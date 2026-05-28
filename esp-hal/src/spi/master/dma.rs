@@ -247,7 +247,23 @@ impl<'d> SpiDma<'d, Async> {
 
     async fn wait_for_idle_async(&mut self) {
         if self.dma_driver().state.rx_transfer_in_progress.get() {
-            _ = DmaRxFuture::new(&mut self.channel.rx).await;
+            let rx_result = DmaRxFuture::new(&mut self.channel.rx).await;
+            if rx_result.is_err() {
+                // esp-hal #491 / docs/spi-dma-and-wakeup.md §7: the RX DMA
+                // descriptor faulted (inlink_dscr_error) — confirmed via
+                // dma_int_raw on fire27 under concurrent BLE+I²C bus traffic.
+                // The SPI never raises TransferDone and its `usr` (busy) bit
+                // stays stuck, so any later wait spins FOREVER (silent :format
+                // wedge: no panic, no timeout). Recover the peripheral so the
+                // next op isn't blocked: reset the DMA (clears the in/out/AHBM
+                // FIFOs holding the SPI data path), then cancel/abort the SPI
+                // (datalen=1 + update) so `usr` clears. The caller then sees
+                // bad/short data (CRC mismatch) → a recoverable error that
+                // sdspi retries at the command level, instead of a hang.
+                self.dma_driver().reset_dma();
+                self.cancel_transfer();
+                return;
+            }
             self.dma_driver().state.rx_transfer_in_progress.set(false);
         }
 
