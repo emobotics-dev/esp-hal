@@ -364,16 +364,42 @@ mod serial_jtag_printer {
 mod uart_printer {
     use super::LockToken;
     const UART_TX_ONE_CHAR: usize = 0x4000_9200;
+    /// UART0_STATUS_REG; bits [23:16] = TX FIFO byte count. FIFO depth 128.
+    const UART0_STATUS_REG: *const u32 = 0x3FF4_001C as *const u32;
+    const TX_FIFO_DEPTH: u32 = 128;
+    /// Total spin iterations allowed PER `write_bytes` call while the TX FIFO is
+    /// full. This whole loop runs inside the cross-core print critical section
+    /// (interrupts OFF). The original code called the blocking ROM
+    /// `uart_tx_one_char` per byte, which holds interrupts OFF for the *entire*
+    /// line's wire-drain time (~18 ms / line at 115200 baud) — long enough to
+    /// starve the BLE controller's RWBLE IRQ on PRO and silently wedge it.
+    /// Here we bound the cumulative wait and DROP the remainder of the line on
+    /// budget exhaustion (non-blocking, like the cores3 RTT console). See
+    /// docs/plans/2026-05-29-async-uart-logging.md and memory fire27-recurring-freeze.
+    const SPIN_BUDGET: u32 = 4_000;
 
     pub struct Printer;
+
+    #[inline]
+    fn tx_fifo_cnt() -> u32 {
+        unsafe { (UART0_STATUS_REG.read_volatile() >> 16) & 0xFF }
+    }
+
     impl Printer {
         pub fn write_bytes_in_cs(bytes: &[u8], _token: LockToken<'_>) {
+            let uart_tx_one_char: unsafe extern "C" fn(u8) -> i32 =
+                unsafe { core::mem::transmute(UART_TX_ONE_CHAR) };
+            let mut budget = SPIN_BUDGET;
             for &b in bytes {
-                unsafe {
-                    let uart_tx_one_char: unsafe extern "C" fn(u8) -> i32 =
-                        core::mem::transmute(UART_TX_ONE_CHAR);
-                    uart_tx_one_char(b)
-                };
+                // Only call the ROM writer when there is FIFO space, so it never
+                // blocks internally. Bounded wait for space; drop rest on timeout.
+                while tx_fifo_cnt() >= TX_FIFO_DEPTH - 2 {
+                    if budget == 0 {
+                        return;
+                    }
+                    budget -= 1;
+                }
+                unsafe { uart_tx_one_char(b) };
             }
         }
 
