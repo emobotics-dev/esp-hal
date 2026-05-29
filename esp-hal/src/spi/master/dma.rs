@@ -267,40 +267,81 @@ impl<'d> SpiDma<'d, Async> {
             self.dma_driver().state.rx_transfer_in_progress.set(false);
         }
 
-        struct Fut(Driver);
+        struct Fut {
+            driver: Driver,
+            // Post-TransferDone busy-spin counter (esp32/esp32s2 only) — see
+            // BUSY_POLL_BUDGET. esp32s3+ never re-polls so it has no field.
+            #[cfg(any(esp32, esp32s2))]
+            busy_polls: u32,
+        }
         impl Fut {
             const DONE_EVENTS: EnumSet<SpiInterrupt> =
                 enumset::enum_set!(SpiInterrupt::TransferDone);
+            // After TransferDone the `usr` (busy) bit normally clears within a
+            // handful of polls. Bound the re-poll so a STUCK `usr` (PDMA
+            // usr-stuck fault, esp-hal #491) can't busy-re-wake forever: an
+            // unbounded `wake_by_ref` self-wake pins the interrupt-executor and
+            // masks the embassy time-driver IRQ, so `with_timeout` never fires
+            // and the whole core wedges (silent :format hang). The budget is
+            // >>> normal settling, so it never false-trips; on exhausting it we
+            // give up and the caller resets+cancels the wedged peripheral.
+            #[cfg(any(esp32, esp32s2))]
+            const BUSY_POLL_BUDGET: u32 = 50_000;
         }
         impl Future for Fut {
             type Output = ();
 
             fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                if !self.0.interrupts().is_disjoint(Self::DONE_EVENTS) {
+                let this = self.get_mut();
+                if !this.driver.interrupts().is_disjoint(Self::DONE_EVENTS) {
                     #[cfg(any(esp32, esp32s2))]
-                    // Need to poll for done-ness even after interrupt fires.
-                    if self.0.busy() {
-                        cx.waker().wake_by_ref();
-                        return Poll::Pending;
+                    // Need to poll for done-ness even after interrupt fires —
+                    // bounded (see BUSY_POLL_BUDGET) so a stuck `usr` can't
+                    // spin forever and wedge the core.
+                    if this.driver.busy() {
+                        this.busy_polls = this.busy_polls.saturating_add(1);
+                        if this.busy_polls < Self::BUSY_POLL_BUDGET {
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
+                        // Budget exhausted: fall through to Ready. The caller
+                        // (wait_for_idle_async) sees still-busy and recovers.
                     }
 
-                    self.0.clear_interrupts(Self::DONE_EVENTS);
+                    this.driver.clear_interrupts(Self::DONE_EVENTS);
                     return Poll::Ready(());
                 }
 
-                self.0.state.waker.register(cx.waker());
-                self.0.enable_listen(Self::DONE_EVENTS, true);
+                this.driver.state.waker.register(cx.waker());
+                this.driver.enable_listen(Self::DONE_EVENTS, true);
                 Poll::Pending
             }
         }
         impl Drop for Fut {
             fn drop(&mut self) {
-                self.0.enable_listen(Self::DONE_EVENTS, false);
+                self.driver.enable_listen(Self::DONE_EVENTS, false);
             }
         }
 
         if !self.is_done() {
-            Fut(self.driver()).await;
+            Fut {
+                driver: self.driver(),
+                #[cfg(any(esp32, esp32s2))]
+                busy_polls: 0,
+            }
+            .await;
+        }
+
+        // esp32/esp32s2: if `usr` is still stuck after the bounded post-DONE
+        // wait, the SPI peripheral wedged (PDMA usr-stuck fault, esp-hal #491).
+        // Recover like the RX-descriptor-fault path above so the next op isn't
+        // blocked — the wedged op returns short/bad data → CRC error → sdspi
+        // retries → recoverable, never a silent infinite hang.
+        #[cfg(any(esp32, esp32s2))]
+        if self.driver().busy() {
+            self.dma_driver().reset_dma();
+            self.cancel_transfer();
+            return;
         }
 
         if self.dma_driver().state.tx_transfer_in_progress.get() {
