@@ -22,7 +22,6 @@ use crate::{
         DmaTxBuffer,
         PeripheralDmaChannel,
         asynch::DmaRxFuture,
-        prepare_for_tx,
     },
     private::DropGuard,
     soc::is_slice_in_dram,
@@ -30,6 +29,10 @@ use crate::{
 };
 #[cfg(esp32)]
 use crate::dma::prepare_for_tx_with_pad;
+// esp32 uses the padded variant (above); other chips use the plain zero-copy
+// path, so gate the import to match its single use site below.
+#[cfg(not(esp32))]
+use crate::dma::prepare_for_tx;
 
 const MAX_DMA_SIZE: usize = 32736;
 
