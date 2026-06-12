@@ -16,6 +16,13 @@ SECTIONS {
   } > RWDATA
 }
 
+/* Both stack-band assertions below guard an ESP32-specific failure mode (the
+   BLE controller blob's DRAM-layout sensitivity) and are meaningless on other
+   chips, so they are scoped to esp32 at preprocess time. This keeps the band
+   independent of which .cargo/config.toml supplies the env values (workspace
+   root vs package subdir) — root builds of non-esp32 targets would otherwise
+   inherit the esp32 band and false-positive on harmless layout shifts. */
+#IF esp32
 /* Compile-time stack-size assertion (lower bound). Builds with too much `.bss`
    would shrink the main task stack below the configured minimum, which on
    ESP32 + BLE silently hangs `btdm_app` init at boot. Default 0 disables the
@@ -45,3 +52,4 @@ ASSERT(
   "main task stack region is larger than ESP_HAL_CONFIG_MAIN_STACK_MAX_SIZE — \
 grow .bss/.noinit usage or raise the configured maximum"
 );
+#ENDIF
