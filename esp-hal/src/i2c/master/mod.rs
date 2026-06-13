@@ -1146,20 +1146,32 @@ where
         //  - Timeout: clear the bus (9 SCL pulses) AND reset the FSM. The
         //    slave may be holding SDA mid-byte and the controller may have
         //    consumed only part of our command list.
-        //  - AcknowledgeCheckFailed: the slave responded with NACK (or wasn't
-        //    there). The controller cleanly observed the NACK and is back to
-        //    idle — no recovery needed. We deliberately SKIP `do_fsm_reset`
-        //    here because that helper calls `PeripheralClockControl::reset`
-        //    on ESP32 (no reliable_fsm_reset), which is a chip-wide
-        //    system-register write. Repeated NACKs at a few-Hz cadence (e.g.
-        //    PPS task polling an absent sensor) thereby produced a stream of
-        //    peripheral-clock resets that desync'd the BLE controller blob —
-        //    root cause of the fire27 "stops emitting at PPS-stop" wedge.
+        //  - AcknowledgeCheckFailed: the slave NACK'd (or wasn't there). The
+        //    bus must still be recovered so the NEXT transaction starts clean —
+        //    an un-recovered NACK permanently poisons every later transaction
+        //    on a shared bus (HIL-proven on ESP32-S3: an absent FT6336U touch /
+        //    PPS sensor NACK killed all later touch reads, and at cold boot the
+        //    AXP2101 backlight-enable too → black screen).
+        //
+        //    EXCEPTION — ESP32 ONLY: neither esp32 nor esp32s3 has
+        //    `i2c_master_has_reliable_fsm_reset`, so on BOTH `do_fsm_reset`
+        //    falls back to `PeripheralClockControl::reset` (a chip-wide
+        //    register write). On esp32 that clock reset, spammed by repeated
+        //    NACKs at a few-Hz cadence (PPS polling an absent sensor), desync'd
+        //    the BLE controller blob — the fire27 "stops emitting at PPS-stop"
+        //    wedge. So we skip recovery on a NACK on ESP32 ONLY. On esp32s3 the
+        //    SAME clock reset is exactly what recovers the bus (its BLE stack
+        //    tolerates it; NACK bursts are bounded — the PPS task stops after
+        //    10 errors), so it MUST run there. The discriminator is the chip,
+        //    NOT `reliable_fsm_reset` (both esp32 and esp32s3 lack it). Chips
+        //    WITH a reliable FSM reset get the cheap local reset.
+        //
         //    Other errors (FifoExceeded, ArbitrationLost, ZeroLengthInvalid,
         //    ExecIncomplete) fall through to a plain FSM reset.
         match error {
             Error::Timeout => self.driver().reset_fsm(true),
-            Error::AcknowledgeCheckFailed(_) => { /* no recovery needed */ }
+            #[cfg(esp32)]
+            Error::AcknowledgeCheckFailed(_) => { /* esp32: skip — clock reset desyncs BLE */ }
             _ => self.driver().reset_fsm(false),
         }
     }
