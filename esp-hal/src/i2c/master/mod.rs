@@ -151,6 +151,40 @@ const I2C_FIFO_SIZE: usize = property!("i2c_master.fifo_size");
 const I2C_CHUNK_SIZE: usize = I2C_FIFO_SIZE - 1;
 const CLEAR_BUS_TIMEOUT_MS: Duration = Duration::from_millis(50);
 
+/// Minimum spacing between NACK-triggered chip-wide clock resets on chips that
+/// lack a reliable FSM reset (esp32/esp32s3 fall back to the SYSTEM-register
+/// `PeripheralClockControl::reset`). Caps how fast that reset can fire so a
+/// sustained NACK stream can't storm the clock-gate and desync the radio blob →
+/// the silent no-panic wedge (m5stack-core#3). Occasional NACKs (spaced further
+/// apart than this) still recover promptly. Tunable.
+#[cfg(not(esp32))]
+const NACK_RECOVER_MIN_INTERVAL_MS: u32 = 50;
+
+/// Rate-limit gate for the NACK recovery reset (see `internal_recover`): true iff
+/// at least `min_interval_ms` has elapsed since the last reset. Pure integer math
+/// (monotonic-clock millis, `u32`-wrap safe) so it is verified at compile time by
+/// the `const` assertions below — the regression guard for the #3 fix.
+#[cfg(not(esp32))]
+const fn nack_reset_allowed(now_ms: u32, last_reset_ms: u32, min_interval_ms: u32) -> bool {
+    now_ms.wrapping_sub(last_reset_ms) >= min_interval_ms
+}
+
+// Compile-time regression for the rate-limit cap (runs in every build; no host
+// test/HIL needed). If someone weakens the cap, the build fails here.
+#[cfg(not(esp32))]
+const _: () = {
+    // spaced beyond the interval → recover
+    assert!(nack_reset_allowed(1000, 900, 50));
+    // within the interval (a burst) → capped/blocked
+    assert!(!nack_reset_allowed(120, 100, 50));
+    // exactly at the boundary → recover
+    assert!(nack_reset_allowed(150, 100, 50));
+    // u32 wrap-around: now=10 wrapped past a near-MAX last → elapsed 30 < 50 → blocked
+    assert!(!nack_reset_allowed(10, u32::MAX - 19, 50));
+    // first NACK after boot (last=0) with real uptime → recover
+    assert!(nack_reset_allowed(1000, 0, 50));
+};
+
 /// Representation of I2C address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -1172,6 +1206,30 @@ where
             Error::Timeout => self.driver().reset_fsm(true),
             #[cfg(esp32)]
             Error::AcknowledgeCheckFailed(_) => { /* esp32: skip — clock reset desyncs BLE */ }
+            // esp32s3 (and other non-esp32): a NACK's recovery is the chip-wide
+            // `PeripheralClockControl::reset` (no reliable FSM reset). It is
+            // needed — an un-recovered NACK poisons later transactions on a
+            // shared bus (HIL-proven on S3) — but a sustained NACK stream (a
+            // device NACKing under radio contention) turns it into a
+            // SYSTEM-register-write storm that desyncs the WiFi/BLE blob → a
+            // silent no-panic wedge (m5stack-core#3). Rate-limit it: recover at
+            // most once per NACK_RECOVER_MIN_INTERVAL_MS. Occasional NACKs still
+            // recover promptly; a burst can't storm the radio. The cap is global
+            // (one clock domain feeds the radio — that is what needs bounding).
+            #[cfg(not(esp32))]
+            Error::AcknowledgeCheckFailed(_) => {
+                use core::sync::atomic::{AtomicU32, Ordering};
+                static LAST_RESET_MS: AtomicU32 = AtomicU32::new(0);
+                let now_ms = Instant::now().duration_since_epoch().as_millis() as u32;
+                if nack_reset_allowed(
+                    now_ms,
+                    LAST_RESET_MS.load(Ordering::Relaxed),
+                    NACK_RECOVER_MIN_INTERVAL_MS,
+                ) {
+                    LAST_RESET_MS.store(now_ms, Ordering::Relaxed);
+                    self.driver().reset_fsm(false);
+                }
+            }
             _ => self.driver().reset_fsm(false),
         }
     }
