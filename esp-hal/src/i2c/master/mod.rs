@@ -1142,8 +1142,27 @@ where
     }
 
     fn internal_recover(&self, error: &Error) {
-        // Timeout errors mean our hardware is (possibly) working when it gets reset. Clear the bus
-        // in this case, to prevent leaving the I2C device mid-transfer.
+        // Recover the controller after any failed transaction by resetting the
+        // FSM. For a Timeout the slave may be holding SDA mid-byte, so also clear
+        // the bus (9 SCL pulses); other errors — including a NACK
+        // (AcknowledgeCheckFailed) — just reset. The reset is REQUIRED on a NACK:
+        // an un-recovered NACK poisons every later transaction on a shared bus
+        // (HIL-proven on ESP32-S3 — an absent FT6336U/PPS NACK killed all later
+        // touch reads and the cold-boot AXP2101 backlight → black screen).
+        //
+        // DO NOT re-add a NACK special-case (skip / rate-limit) to "protect the
+        // radio". Earlier revisions did (esp32 skip, esp32s3 rate-limit),
+        // believing the chip-wide `PeripheralClockControl::reset` fallback
+        // (esp32/esp32s3 lack a reliable FSM reset) desync'd the WiFi/BLE blob
+        // (m5stack-core#3/#10). That was a MISATTRIBUTION. `PeripheralClockControl::
+        // reset(I2cExt0)` is a critical-section-guarded RMW of `SYSTEM.PERIP_RST_EN`
+        // toggling only `i2c_ext0_rst`; that register has NO radio bits (radio
+        // reset/clock live in the separate DPORT CORE_RST_EN / WIFI_CLK_EN), so it
+        // cannot touch the radio. HIL confirmed: reset-on-every-NACK, 30k+ resets
+        // under WiFi+BLE coex, esp32 + esp32s3, zero wedge. The real wedge was
+        // I2C-completion-IRQ vs RWBLE same-core level-1 contention — fixed
+        // application-side by binding the I2C IRQ to the APP core, off the radio's
+        // core (see alternator-regulator `docs/irq-core-binding.md`). Not a HAL bug.
         self.driver().reset_fsm(*error == Error::Timeout)
     }
 
