@@ -570,6 +570,20 @@ impl DmaTxBuf {
         (self.descriptors.into_inner(), self.buffer)
     }
 
+    /// Address of this buffer's first DMA descriptor.
+    ///
+    /// The address a channel's link-list register must be programmed with to
+    /// transfer into or out of this buffer. Exposed so a transfer can be armed
+    /// from an interrupt handler without giving up esp-hal's ownership of the
+    /// descriptors: the alternative is for a driver to build its own descriptor
+    /// chain, which discards the validation `new` performs.
+    ///
+    /// The value is stable for the life of the buffer.
+    #[instability::unstable]
+    pub fn descriptor_address(&mut self) -> u32 {
+        self.descriptors.head() as u32
+    }
+
     /// Returns the size of the underlying buffer
     pub fn capacity(&self) -> usize {
         self.buffer.len()
@@ -753,6 +767,20 @@ impl DmaRxBuf {
     /// Consume the buf, returning the descriptors and buffer.
     pub fn split(self) -> (&'static mut [DmaDescriptor], &'static mut [u8]) {
         (self.descriptors.into_inner(), self.buffer)
+    }
+
+    /// Address of this buffer's first DMA descriptor.
+    ///
+    /// The address a channel's link-list register must be programmed with to
+    /// transfer into or out of this buffer. Exposed so a transfer can be armed
+    /// from an interrupt handler without giving up esp-hal's ownership of the
+    /// descriptors: the alternative is for a driver to build its own descriptor
+    /// chain, which discards the validation `new` performs.
+    ///
+    /// The value is stable for the life of the buffer.
+    #[instability::unstable]
+    pub fn descriptor_address(&mut self) -> u32 {
+        self.descriptors.head() as u32
     }
 
     /// Returns the size of the underlying buffer
