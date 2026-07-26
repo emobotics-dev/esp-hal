@@ -165,6 +165,26 @@ impl InterruptAccess<DmaTxInterrupt> for AnyGdmaTxChannel<'_> {
                     DmaTxInterrupt::DescriptorError => w.out_dscr_err().bit(enable),
                     DmaTxInterrupt::Eof => w.out_eof().bit(enable),
                     DmaTxInterrupt::Done => w.out_done().bit(enable),
+                    DmaTxInterrupt::FifoOverflow => {
+                        cfg_if::cfg_if! {
+                            if #[cfg(esp32s3)] {
+                                w.outfifo_ovf_l1().bit(enable);
+                                w.outfifo_ovf_l3().bit(enable)
+                            } else {
+                                w.outfifo_ovf().bit(enable)
+                            }
+                        }
+                    }
+                    DmaTxInterrupt::FifoUnderflow => {
+                        cfg_if::cfg_if! {
+                            if #[cfg(esp32s3)] {
+                                w.outfifo_udf_l1().bit(enable);
+                                w.outfifo_udf_l3().bit(enable)
+                            } else {
+                                w.outfifo_udf().bit(enable)
+                            }
+                        }
+                    }
                 };
             }
             w
@@ -187,6 +207,23 @@ impl InterruptAccess<DmaTxInterrupt> for AnyGdmaTxChannel<'_> {
         if int_ena.out_done().bit_is_set() {
             result |= DmaTxInterrupt::Done;
         }
+        cfg_if::cfg_if! {
+            if #[cfg(esp32s3)] {
+                if int_ena.outfifo_ovf_l1().bit_is_set() || int_ena.outfifo_ovf_l3().bit_is_set() {
+                    result |= DmaTxInterrupt::FifoOverflow;
+                }
+                if int_ena.outfifo_udf_l1().bit_is_set() || int_ena.outfifo_udf_l3().bit_is_set() {
+                    result |= DmaTxInterrupt::FifoUnderflow;
+                }
+            } else {
+                if int_ena.outfifo_ovf().bit_is_set() {
+                    result |= DmaTxInterrupt::FifoOverflow;
+                }
+                if int_ena.outfifo_udf().bit_is_set() {
+                    result |= DmaTxInterrupt::FifoUnderflow;
+                }
+            }
+        }
 
         result
     }
@@ -199,6 +236,26 @@ impl InterruptAccess<DmaTxInterrupt> for AnyGdmaTxChannel<'_> {
                     DmaTxInterrupt::DescriptorError => w.out_dscr_err().clear_bit_by_one(),
                     DmaTxInterrupt::Eof => w.out_eof().clear_bit_by_one(),
                     DmaTxInterrupt::Done => w.out_done().clear_bit_by_one(),
+                    DmaTxInterrupt::FifoOverflow => {
+                        cfg_if::cfg_if! {
+                            if #[cfg(esp32s3)] {
+                                w.outfifo_ovf_l1().clear_bit_by_one();
+                                w.outfifo_ovf_l3().clear_bit_by_one()
+                            } else {
+                                w.outfifo_ovf().clear_bit_by_one()
+                            }
+                        }
+                    }
+                    DmaTxInterrupt::FifoUnderflow => {
+                        cfg_if::cfg_if! {
+                            if #[cfg(esp32s3)] {
+                                w.outfifo_udf_l1().clear_bit_by_one();
+                                w.outfifo_udf_l3().clear_bit_by_one()
+                            } else {
+                                w.outfifo_udf().clear_bit_by_one()
+                            }
+                        }
+                    }
                 };
             }
             w
@@ -220,6 +277,23 @@ impl InterruptAccess<DmaTxInterrupt> for AnyGdmaTxChannel<'_> {
         }
         if int_raw.out_done().bit_is_set() {
             result |= DmaTxInterrupt::Done;
+        }
+        cfg_if::cfg_if! {
+            if #[cfg(esp32s3)] {
+                if int_raw.outfifo_ovf_l1().bit_is_set() || int_raw.outfifo_ovf_l3().bit_is_set() {
+                    result |= DmaTxInterrupt::FifoOverflow;
+                }
+                if int_raw.outfifo_udf_l1().bit_is_set() || int_raw.outfifo_udf_l3().bit_is_set() {
+                    result |= DmaTxInterrupt::FifoUnderflow;
+                }
+            } else {
+                if int_raw.outfifo_ovf().bit_is_set() {
+                    result |= DmaTxInterrupt::FifoOverflow;
+                }
+                if int_raw.outfifo_udf().bit_is_set() {
+                    result |= DmaTxInterrupt::FifoUnderflow;
+                }
+            }
         }
 
         result
@@ -393,6 +467,28 @@ impl InterruptAccess<DmaRxInterrupt> for AnyGdmaRxChannel<'_> {
                     DmaRxInterrupt::DescriptorError => w.in_dscr_err().bit(enable),
                     DmaRxInterrupt::DescriptorEmpty => w.in_dscr_empty().bit(enable),
                     DmaRxInterrupt::Done => w.in_done().bit(enable),
+                    #[cfg(esp32s3)]
+                    DmaRxInterrupt::FifoFullWatermark => w.infifo_full_wm().bit(enable),
+                    DmaRxInterrupt::FifoOverflow => {
+                        cfg_if::cfg_if! {
+                            if #[cfg(esp32s3)] {
+                                w.infifo_ovf_l1().bit(enable);
+                                w.infifo_ovf_l3().bit(enable)
+                            } else {
+                                w.infifo_ovf().bit(enable)
+                            }
+                        }
+                    }
+                    DmaRxInterrupt::FifoUnderflow => {
+                        cfg_if::cfg_if! {
+                            if #[cfg(esp32s3)] {
+                                w.infifo_udf_l1().bit(enable);
+                                w.infifo_udf_l3().bit(enable)
+                            } else {
+                                w.infifo_udf().bit(enable)
+                            }
+                        }
+                    }
                 };
             }
             w
@@ -418,6 +514,27 @@ impl InterruptAccess<DmaRxInterrupt> for AnyGdmaRxChannel<'_> {
         if int_ena.in_done().bit_is_set() {
             result |= DmaRxInterrupt::Done;
         }
+        #[cfg(esp32s3)]
+        if int_ena.infifo_full_wm().bit_is_set() {
+            result |= DmaRxInterrupt::FifoFullWatermark;
+        }
+        cfg_if::cfg_if! {
+            if #[cfg(esp32s3)] {
+                if int_ena.infifo_ovf_l1().bit_is_set() || int_ena.infifo_ovf_l3().bit_is_set() {
+                    result |= DmaRxInterrupt::FifoOverflow;
+                }
+                if int_ena.infifo_udf_l1().bit_is_set() || int_ena.infifo_udf_l3().bit_is_set() {
+                    result |= DmaRxInterrupt::FifoUnderflow;
+                }
+            } else {
+                if int_ena.infifo_ovf().bit_is_set() {
+                    result |= DmaRxInterrupt::FifoOverflow;
+                }
+                if int_ena.infifo_udf().bit_is_set() {
+                    result |= DmaRxInterrupt::FifoUnderflow;
+                }
+            }
+        }
 
         result
     }
@@ -431,6 +548,31 @@ impl InterruptAccess<DmaRxInterrupt> for AnyGdmaRxChannel<'_> {
                     DmaRxInterrupt::DescriptorError => w.in_dscr_err().clear_bit_by_one(),
                     DmaRxInterrupt::DescriptorEmpty => w.in_dscr_empty().clear_bit_by_one(),
                     DmaRxInterrupt::Done => w.in_done().clear_bit_by_one(),
+                    // Note the field name: the S3 PAC calls the watermark bit
+                    // `dma_infifo_full_wm` in IN_INT_CLR but `infifo_full_wm`
+                    // in IN_INT_RAW / IN_INT_ENA.
+                    #[cfg(esp32s3)]
+                    DmaRxInterrupt::FifoFullWatermark => w.dma_infifo_full_wm().clear_bit_by_one(),
+                    DmaRxInterrupt::FifoOverflow => {
+                        cfg_if::cfg_if! {
+                            if #[cfg(esp32s3)] {
+                                w.infifo_ovf_l1().clear_bit_by_one();
+                                w.infifo_ovf_l3().clear_bit_by_one()
+                            } else {
+                                w.infifo_ovf().clear_bit_by_one()
+                            }
+                        }
+                    }
+                    DmaRxInterrupt::FifoUnderflow => {
+                        cfg_if::cfg_if! {
+                            if #[cfg(esp32s3)] {
+                                w.infifo_udf_l1().clear_bit_by_one();
+                                w.infifo_udf_l3().clear_bit_by_one()
+                            } else {
+                                w.infifo_udf().clear_bit_by_one()
+                            }
+                        }
+                    }
                 };
             }
             w
@@ -455,6 +597,27 @@ impl InterruptAccess<DmaRxInterrupt> for AnyGdmaRxChannel<'_> {
         }
         if int_raw.in_done().bit_is_set() {
             result |= DmaRxInterrupt::Done;
+        }
+        #[cfg(esp32s3)]
+        if int_raw.infifo_full_wm().bit_is_set() {
+            result |= DmaRxInterrupt::FifoFullWatermark;
+        }
+        cfg_if::cfg_if! {
+            if #[cfg(esp32s3)] {
+                if int_raw.infifo_ovf_l1().bit_is_set() || int_raw.infifo_ovf_l3().bit_is_set() {
+                    result |= DmaRxInterrupt::FifoOverflow;
+                }
+                if int_raw.infifo_udf_l1().bit_is_set() || int_raw.infifo_udf_l3().bit_is_set() {
+                    result |= DmaRxInterrupt::FifoUnderflow;
+                }
+            } else {
+                if int_raw.infifo_ovf().bit_is_set() {
+                    result |= DmaRxInterrupt::FifoOverflow;
+                }
+                if int_raw.infifo_udf().bit_is_set() {
+                    result |= DmaRxInterrupt::FifoUnderflow;
+                }
+            }
         }
 
         result
