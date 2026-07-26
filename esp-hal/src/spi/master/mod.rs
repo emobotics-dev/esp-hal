@@ -2366,9 +2366,28 @@ impl Driver {
     fn set_up_common_phases(&self, cmd: Command, address: Address, dummy: u8) {
         let reg_block = self.regs();
         if !cmd.is_none() {
+            // The command phase is NOT sent straight out of the register: the
+            // hardware transmits `USR_COMMAND_VALUE[7:0]` first and only then
+            // `USR_COMMAND_VALUE[COMMAND_BITLEN:8]`, MSB first within each byte
+            // (ESP32-S3 TRM table "Sending Sequence of Command Value"; stated
+            // for both `WR_BIT_ORDER` settings, so it is not a bit-order
+            // effect). Writing `cmd.value()` raw therefore puts a >8-bit
+            // command on the wire byte-swapped, and a <8-bit command
+            // right-aligned in a byte the hardware reads left-aligned.
+            //
+            // Pre-encode exactly as ESP-IDF does
+            // (`HAL_SPI_SWAP_DATA_TX(cmd, len) = bswap32(cmd << (32 - len))`,
+            // `hal/spi_ll.h`), which is byte-identical across esp32, esp32s2,
+            // esp32s3, esp32c3 and esp32p4 — hence no per-chip variant here.
+            // Width 8 is the identity, which is why 8-bit commands (i.e. every
+            // ordinary SPI device) worked before this.
+            //
+            // Note the *address* phase below uses the other convention — it is
+            // left-aligned (`value << (32 - width)`) — and is already correct.
+            let value = ((cmd.value() as u32) << (32 - cmd.width())).swap_bytes() as u16;
             reg_block.user2().modify(|_, w| unsafe {
                 w.usr_command_bitlen().bits((cmd.width() - 1) as u8);
-                w.usr_command_value().bits(cmd.value())
+                w.usr_command_value().bits(value)
             });
         }
 
