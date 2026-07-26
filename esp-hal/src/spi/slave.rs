@@ -82,6 +82,8 @@ use crate::{
     pac::spi2::RegisterBlock,
     system::PeripheralGuard,
 };
+#[cfg(esp32)]
+use crate::gpio::{Level, interconnect::InputSignal as InputSignalPin};
 
 /// SPI peripheral driver.
 ///
@@ -91,6 +93,14 @@ pub struct Spi<'d, Dm: DriverMode> {
     spi: AnySpi<'d>,
     #[allow(dead_code)]
     data_mode: Mode,
+    /// #21 workaround state: on ESP32, a stray master transaction while the
+    /// DMA is being (re-)armed corrupts the PDMA slave state (see
+    /// `SPI_LL_SLAVE_NEEDS_CS_WORKAROUND` in ESP-IDF's `spi_ll.h` — the CS
+    /// input gets forced to a constant-high GPIO-matrix signal for the
+    /// duration of `start_transfer_dma`, then reconnected here once armed).
+    /// Retaining the pin is what makes the reconnect possible.
+    #[cfg(esp32)]
+    cs_pin: Option<InputSignalPin<'d>>,
     _mode: PhantomData<Dm>,
     _guard: PeripheralGuard,
 }
@@ -103,6 +113,8 @@ impl<'d> Spi<'d, Blocking> {
         let this = Spi {
             spi: spi.degrade(),
             data_mode: mode,
+            #[cfg(esp32)]
+            cs_pin: None,
             _mode: PhantomData,
             _guard: guard,
         };
@@ -150,7 +162,15 @@ impl<'d> Spi<'d, Blocking> {
 
     /// Assign the CS (Chip Select) pin for the SPI instance.
     #[instability::unstable]
-    pub fn with_cs(self, cs: impl PeripheralInput<'d>) -> Self {
+    #[cfg_attr(not(esp32), allow(unused_mut))]
+    pub fn with_cs(mut self, cs: impl PeripheralInput<'d>) -> Self {
+        #[cfg(esp32)]
+        {
+            let cs: InputSignalPin<'d> = cs.into();
+            self.cs_pin = Some(cs.clone());
+            self.connect_input_pin(cs, self.spi.info().cs);
+        }
+        #[cfg(not(esp32))]
         self.connect_input_pin(cs, self.spi.info().cs);
         self
     }
@@ -189,7 +209,14 @@ pub mod dma {
         #[instability::unstable]
         pub fn with_dma(self, channel: impl DmaChannelFor<AnySpi<'d>>) -> SpiDma<'d, Blocking> {
             self.spi.info().set_data_mode(self.data_mode, true);
-            SpiDma::new(self.spi, channel.degrade())
+            #[cfg(esp32)]
+            let cs_pin = self.cs_pin;
+            SpiDma::new(
+                self.spi,
+                channel.degrade(),
+                #[cfg(esp32)]
+                cs_pin,
+            )
         }
     }
 
@@ -201,6 +228,11 @@ pub mod dma {
     {
         pub(crate) spi: AnySpi<'d>,
         pub(crate) channel: Channel<Dm, PeripheralDmaChannel<AnySpi<'d>>>,
+        /// ESP32 #21 workaround state, carried over from `Spi::with_cs` so
+        /// `read`/`write`/`transfer` can freeze/restore CS around each DMA
+        /// (re-)arm.
+        #[cfg(esp32)]
+        cs_pin: Option<InputSignalPin<'d>>,
         _guard: PeripheralGuard,
     }
 
@@ -214,7 +246,11 @@ pub mod dma {
     }
 
     impl<'d> SpiDma<'d, Blocking> {
-        fn new(spi: AnySpi<'d>, channel: PeripheralDmaChannel<AnySpi<'d>>) -> Self {
+        fn new(
+            spi: AnySpi<'d>,
+            channel: PeripheralDmaChannel<AnySpi<'d>>,
+            #[cfg(esp32)] cs_pin: Option<InputSignalPin<'d>>,
+        ) -> Self {
             let channel = Channel::new(channel);
             channel.runtime_ensure_compatible(&spi);
             let guard = PeripheralGuard::new(spi.info().peripheral);
@@ -222,6 +258,8 @@ pub mod dma {
             Self {
                 spi,
                 channel,
+                #[cfg(esp32)]
+                cs_pin,
                 _guard: guard,
             }
         }
@@ -235,6 +273,26 @@ pub mod dma {
             DmaDriver {
                 info: self.spi.info(),
                 dma_peripheral: self.spi.dma_peripheral(),
+            }
+        }
+
+        /// #21 workaround: force the CS input to a constant-deasserted
+        /// GPIO-matrix signal so a stray master transaction can't corrupt
+        /// the ESP32 PDMA slave state while a transfer is being (re-)armed
+        /// (ESP-IDF `SPI_LL_SLAVE_NEEDS_CS_WORKAROUND` / `freeze_cs`).
+        #[cfg(esp32)]
+        fn freeze_cs(&self) {
+            if self.cs_pin.is_some() {
+                self.spi.info().cs.connect_to(&Level::High);
+            }
+        }
+
+        /// Reconnects the real CS pin once the transfer is armed (ESP-IDF's
+        /// `restore_cs`). No-op if `with_cs` was never given a real pin.
+        #[cfg(esp32)]
+        fn restore_cs(&self) {
+            if let Some(cs) = &self.cs_pin {
+                self.spi.info().cs.connect_to(cs);
             }
         }
 
@@ -257,6 +315,8 @@ pub mod dma {
                 return Err((Error::MaxDmaTransferSizeExceeded, self, buffer));
             }
 
+            #[cfg(esp32)]
+            self.freeze_cs();
             let result = unsafe {
                 self.driver().start_transfer_dma(
                     0,
@@ -266,6 +326,8 @@ pub mod dma {
                     &mut self.channel,
                 )
             };
+            #[cfg(esp32)]
+            self.restore_cs();
             if let Err(err) = result {
                 return Err((err, self, buffer));
             }
@@ -292,6 +354,8 @@ pub mod dma {
                 return Err((Error::MaxDmaTransferSizeExceeded, self, buffer));
             }
 
+            #[cfg(esp32)]
+            self.freeze_cs();
             let result = unsafe {
                 self.driver().start_transfer_dma(
                     bytes_to_read,
@@ -301,6 +365,8 @@ pub mod dma {
                     &mut self.channel,
                 )
             };
+            #[cfg(esp32)]
+            self.restore_cs();
             if let Err(err) = result {
                 return Err((err, self, buffer));
             }
@@ -337,6 +403,8 @@ pub mod dma {
                 ));
             }
 
+            #[cfg(esp32)]
+            self.freeze_cs();
             let result = unsafe {
                 self.driver().start_transfer_dma(
                     bytes_to_read,
@@ -346,6 +414,8 @@ pub mod dma {
                     &mut self.channel,
                 )
             };
+            #[cfg(esp32)]
+            self.restore_cs();
             if let Err(err) = result {
                 return Err((err, self, rx_buffer, tx_buffer));
             }
@@ -470,25 +540,15 @@ pub mod dma {
             tx_buffer: &mut impl DmaTxBuffer,
             channel: &mut Channel<Dm, PeripheralDmaChannel<AnySpi<'_>>>,
         ) -> Result<(), Error> {
-            self.enable_dma();
-
+            // #21: ESP-IDF's spi_intr() resets the SPI FSM
+            // (spi_slave_hal_hw_reset / sync_reset) *before* resetting the
+            // DMA/AHB fifo (spi_slave_hal_hw_prepare_rx, called from
+            // s_spi_slave_dma_prepare_data — after hw_reset). Doing it the
+            // other way round left the DMA-side reset seemingly undone by
+            // the FSM reset that followed it.
             self.info.reset_spi();
 
-            if read_buffer_len > 0 {
-                unsafe {
-                    channel
-                        .rx
-                        .prepare_transfer(self.dma_peripheral, rx_buffer)?;
-                }
-            }
-
-            if write_buffer_len > 0 {
-                unsafe {
-                    channel
-                        .tx
-                        .prepare_transfer(self.dma_peripheral, tx_buffer)?;
-                }
-            }
+            self.enable_dma();
 
             #[cfg(esp32)]
             self.info
@@ -503,15 +563,34 @@ pub mod dma {
 
             self.clear_dma_interrupts();
             self.info.setup_for_flush();
-            self.regs().cmd().modify(|_, w| w.usr().set_bit());
 
+            // #21: the DMA channels must be armed (prepared *and* started —
+            // ESP-IDF's `s_spi_slave_dma_prepare_data`/`spi_dma_start`)
+            // *before* `cmd.usr` is set. `cmd.usr` is the slave's "I'm
+            // ready" trigger (`spi_slave_hal_user_start`, called last in
+            // IDF's `spi_intr`); setting it first left a window where the
+            // bus-level transaction could complete (`slave.trans_done`)
+            // while the DMA channel had not yet been told to start, so it
+            // never received anything.
             if read_buffer_len > 0 {
-                channel.rx.start_transfer()?;
+                unsafe {
+                    channel
+                        .rx
+                        .prepare_transfer(self.dma_peripheral, rx_buffer)?;
+                    channel.rx.start_transfer()?;
+                }
             }
 
             if write_buffer_len > 0 {
-                channel.tx.start_transfer()?;
+                unsafe {
+                    channel
+                        .tx
+                        .prepare_transfer(self.dma_peripheral, tx_buffer)?;
+                    channel.tx.start_transfer()?;
+                }
             }
+
+            self.regs().cmd().modify(|_, w| w.usr().set_bit());
 
             Ok(())
         }
@@ -666,12 +745,17 @@ impl Info {
 
     #[cfg(esp32)]
     fn prepare_length_and_lines(&self, rx_len: usize, tx_len: usize) {
-        self.regs()
-            .slv_rdbuf_dlen()
-            .write(|w| unsafe { w.bits((rx_len as u32 * 8).saturating_sub(1)) });
-        self.regs()
-            .slv_wrbuf_dlen()
-            .write(|w| unsafe { w.bits((tx_len as u32 * 8).saturating_sub(1)) });
+        // #21: full-duplex slave transaction — ESP-IDF's
+        // `spi_slave_hal_set_trans_bitlen` sets BOTH length registers to
+        // `max(rx, tx)` bits, not each to its own direction's length. An
+        // RX-only (or TX-only) call previously left the other register at
+        // ~0 bits while the master still clocked the full transaction,
+        // desyncing DMA EOF from the bus's own `trans_done`: the bus-level
+        // transaction completed but the DMA buffer never filled.
+        let max_len = rx_len.max(tx_len);
+        let bitlen = (max_len as u32 * 8).saturating_sub(1);
+        self.regs().slv_rdbuf_dlen().write(|w| unsafe { w.bits(bitlen) });
+        self.regs().slv_wrbuf_dlen().write(|w| unsafe { w.bits(bitlen) });
 
         // SPI Slave mode on ESP32 requires MOSI/MISO enable
         self.regs().user().modify(|_, w| {
