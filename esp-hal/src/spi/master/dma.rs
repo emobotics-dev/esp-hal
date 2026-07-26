@@ -24,8 +24,10 @@ use crate::{
         DmaEligiblePeripheral,
         DmaRxBuf,
         DmaRxBuffer,
+        DmaRxInterrupt,
         DmaTxBuf,
         DmaTxBuffer,
+        DmaTxInterrupt,
         NoBuffer,
         ScopedDmaRxBuf,
         ScopedDmaTxBuf,
@@ -317,6 +319,155 @@ impl<'d> SpiDma<'d, Blocking> {
     #[instability::unstable]
     pub fn interrupts(&mut self) -> EnumSet<SpiInterrupt> {
         self.driver().interrupts()
+    }
+
+    /// Listen for the given DMA receive interrupts.
+    ///
+    /// Separate from [`SpiDma::listen`], which covers the SPI peripheral's own
+    /// interrupts: a chained receive must complete on `IN_SUC_EOF` -- the
+    /// signal that means the bytes are in memory -- and not on the SPI
+    /// transaction being over, which is earlier.
+    #[instability::unstable]
+    pub fn listen_dma_rx(&mut self, interrupts: impl Into<EnumSet<DmaRxInterrupt>>) {
+        self.channel.rx.listen_in(interrupts);
+    }
+
+    /// Stop listening for the given DMA receive interrupts.
+    #[instability::unstable]
+    pub fn unlisten_dma_rx(&mut self, interrupts: impl Into<EnumSet<DmaRxInterrupt>>) {
+        self.channel.rx.unlisten_in(interrupts);
+    }
+
+    /// Gets asserted DMA receive interrupts.
+    #[instability::unstable]
+    pub fn pending_dma_rx(&mut self) -> EnumSet<DmaRxInterrupt> {
+        self.channel.rx.pending_in_interrupts()
+    }
+
+    /// Clears the given DMA receive interrupts.
+    ///
+    /// A handler that re-arms must clear first: an interrupt left asserted from
+    /// the previous transfer makes the next one look complete the moment it is
+    /// armed.
+    #[instability::unstable]
+    pub fn clear_dma_rx(&mut self, interrupts: impl Into<EnumSet<DmaRxInterrupt>>) {
+        self.channel.rx.clear_in(interrupts);
+    }
+
+    /// Listen for the given DMA transmit interrupts.
+    #[instability::unstable]
+    pub fn listen_dma_tx(&mut self, interrupts: impl Into<EnumSet<DmaTxInterrupt>>) {
+        self.channel.tx.listen_out(interrupts);
+    }
+
+    /// Stop listening for the given DMA transmit interrupts.
+    #[instability::unstable]
+    pub fn unlisten_dma_tx(&mut self, interrupts: impl Into<EnumSet<DmaTxInterrupt>>) {
+        self.channel.tx.unlisten_out(interrupts);
+    }
+
+    /// Gets asserted DMA transmit interrupts.
+    #[instability::unstable]
+    pub fn pending_dma_tx(&mut self) -> EnumSet<DmaTxInterrupt> {
+        self.channel.tx.pending_out_interrupts()
+    }
+
+    /// Clears the given DMA transmit interrupts.
+    #[instability::unstable]
+    pub fn clear_dma_tx(&mut self, interrupts: impl Into<EnumSet<DmaTxInterrupt>>) {
+        self.channel.tx.clear_out(interrupts);
+    }
+
+    /// Whether the transfer in flight has finished, without waiting for it.
+    ///
+    /// True once both DMA halves are done and the SPI peripheral is idle. This
+    /// is the check an interrupt handler makes; [`SpiDmaTransfer::wait`] is the
+    /// same condition with a spin loop around it, which a handler cannot
+    /// afford.
+    #[instability::unstable]
+    pub fn transfer_done(&self) -> bool {
+        self.is_done()
+    }
+
+    /// Arm a half-duplex read and return immediately, without a transfer
+    /// object and without waiting.
+    ///
+    /// This is the primitive an interrupt-chained driver needs: the completion
+    /// arrives as an interrupt, and the next transaction is armed from inside
+    /// that handler, so there is nothing to hold a waiter or a `Future`. The
+    /// buffer stays owned by the caller, which keeps the validation
+    /// [`DmaRxBuf::new`] performs.
+    ///
+    /// Pair every call with [`SpiDma::take_transfer`] once
+    /// [`SpiDma::transfer_done`] is true.
+    ///
+    /// # Safety
+    ///
+    /// The caller must not access `buffer`'s contents, drop it, or arm another
+    /// transfer until [`SpiDma::take_transfer`] has returned `true`. Moving the
+    /// buffer is allowed. Nothing here checks that a transfer is already in
+    /// flight -- the caller's state machine is what guarantees it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error`] if the requested transfer cannot be programmed.
+    #[cfg_attr(place_spi_master_driver_in_ram, ram)]
+    #[instability::unstable]
+    pub unsafe fn arm_half_duplex_read(
+        &mut self,
+        data_mode: DataMode,
+        cmd: Command,
+        address: Address,
+        dummy: u8,
+        bytes_to_read: usize,
+        buffer: &mut impl DmaRxBuffer,
+    ) -> Result<(), Error> {
+        unsafe {
+            self.start_half_duplex_read(data_mode, cmd, address, dummy, bytes_to_read, buffer)
+        }
+    }
+
+    /// Arm a half-duplex write and return immediately. The mirror of
+    /// [`SpiDma::arm_half_duplex_read`]; the same safety contract applies.
+    ///
+    /// # Safety
+    ///
+    /// See [`SpiDma::arm_half_duplex_read`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error`] if the requested transfer cannot be programmed.
+    #[cfg_attr(place_spi_master_driver_in_ram, ram)]
+    #[instability::unstable]
+    pub unsafe fn arm_half_duplex_write(
+        &mut self,
+        data_mode: DataMode,
+        cmd: Command,
+        address: Address,
+        dummy: u8,
+        bytes_to_write: usize,
+        buffer: &mut impl DmaTxBuffer,
+    ) -> Result<(), Error> {
+        unsafe {
+            self.start_half_duplex_write(data_mode, cmd, address, dummy, bytes_to_write, buffer)
+        }
+    }
+
+    /// Release an armed transfer if it has finished, returning whether it had.
+    ///
+    /// The non-blocking half of [`SpiDmaTransfer::wait`]: on `true` the
+    /// in-flight state is cleared with an acquire fence, so the buffer's
+    /// contents are visible to the CPU and the buffer may be read, reused or
+    /// dropped. On `false` nothing changes and the transfer is still running.
+    #[instability::unstable]
+    pub fn take_transfer(&mut self) -> bool {
+        if !self.is_done() {
+            return false;
+        }
+        self.dma_driver().state.rx_transfer_in_progress.set(false);
+        self.dma_driver().state.tx_transfer_in_progress.set(false);
+        fence(Ordering::Acquire);
+        true
     }
 
     /// Resets asserted interrupts
