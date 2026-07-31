@@ -282,16 +282,16 @@ where
 
     /// Listen for RX-PACKET-RECV interrupts
     pub fn listen_rx_packet_recv_interrupt(&mut self) {
-        self.regs()
-            .int_ena()
-            .modify(|_, w| w.serial_out_recv_pkt().set_bit());
+        // `&mut self` excludes another caller, not the handler. See `INT_ENA_LOCK`.
+        let int_ena = self.regs().int_ena();
+        INT_ENA_LOCK.lock(|| int_ena.modify(|_, w| w.serial_out_recv_pkt().set_bit()));
     }
 
     /// Stop listening for RX-PACKET-RECV interrupts
     pub fn unlisten_rx_packet_recv_interrupt(&mut self) {
-        self.regs()
-            .int_ena()
-            .modify(|_, w| w.serial_out_recv_pkt().clear_bit());
+        // Guarded: see `INT_ENA_LOCK`.
+        let int_ena = self.regs().int_ena();
+        INT_ENA_LOCK.lock(|| int_ena.modify(|_, w| w.serial_out_recv_pkt().clear_bit()));
     }
 
     /// Checks if RX-PACKET-RECV interrupt is set
@@ -454,9 +454,9 @@ pub trait Instance: crate::private::Sealed {
 
     /// Disable all transmit interrupts for the peripheral
     fn disable_tx_interrupts(&self) {
-        self.register_block()
-            .int_ena()
-            .modify(|_, w| w.serial_in_empty().clear_bit());
+        // Guarded: see `INT_ENA_LOCK`.
+        let int_ena = self.register_block().int_ena();
+        INT_ENA_LOCK.lock(|| int_ena.modify(|_, w| w.serial_in_empty().clear_bit()));
 
         self.register_block()
             .int_clr()
@@ -465,9 +465,9 @@ pub trait Instance: crate::private::Sealed {
 
     /// Disable all receive interrupts for the peripheral
     fn disable_rx_interrupts(&self) {
-        self.register_block()
-            .int_ena()
-            .modify(|_, w| w.serial_out_recv_pkt().clear_bit());
+        // Guarded: see `INT_ENA_LOCK`.
+        let int_ena = self.register_block().int_ena();
+        INT_ENA_LOCK.lock(|| int_ena.modify(|_, w| w.serial_out_recv_pkt().clear_bit()));
 
         self.register_block()
             .int_clr()
@@ -704,6 +704,19 @@ static WAKER_TX: AtomicWaker = AtomicWaker::new();
 
 static WAKER_RX: AtomicWaker = AtomicWaker::new();
 
+/// Serialises every read-modify-write of `int_ena`.
+///
+/// `int_ena` holds the TX and RX enables in one register, and both task context
+/// (a future arming) and the handler (a future releasing) `modify()` it. The
+/// handler preempts task context between the read and the write, so the stale
+/// write-back resurrects a bit the handler just cleared. The woken waiter then
+/// polls, finds its readiness bit set again, and parks forever on data already
+/// in the endpoint -- a console deaf while transmitting perfectly.
+///
+/// `RawMutex` disables interrupts, which is the guarantee required.
+/// `esp_hal::timer::timg` and `systimer` guard their own `int_ena` the same way.
+static INT_ENA_LOCK: esp_sync::RawMutex = esp_sync::RawMutex::new();
+
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 struct UsbSerialJtagWriteFuture<'d> {
     peripheral: USB_DEVICE<'d>,
@@ -711,12 +724,9 @@ struct UsbSerialJtagWriteFuture<'d> {
 
 impl<'d> UsbSerialJtagWriteFuture<'d> {
     fn new(peripheral: USB_DEVICE<'d>) -> Self {
-        // Set the interrupt enable bit for the USB_SERIAL_JTAG_SERIAL_IN_EMPTY_INT
-        // interrupt
-        peripheral
-            .register_block()
-            .int_ena()
-            .modify(|_, w| w.serial_in_empty().set_bit());
+        // Lookup hoisted so only the read-modify-write is locked. See `INT_ENA_LOCK`.
+        let int_ena = peripheral.register_block().int_ena();
+        INT_ENA_LOCK.lock(|| int_ena.modify(|_, w| w.serial_in_empty().set_bit()));
 
         Self { peripheral }
     }
@@ -751,17 +761,9 @@ impl core::future::Future for UsbSerialJtagWriteFuture<'_> {
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<Self::Output> {
         WAKER_TX.register(cx.waker());
-        // Ready on the ACTUAL condition as well as on the interrupt having
-        // fired, so the common case needs no interrupt at all.
-        //
-        // **This is not a safety net for a lost wakeup, and must not be
-        // described as one.** A future that is never woken is never polled, so
-        // checking the hardware here cannot rescue a task already parked --
-        // measured 2026-07-31: with this check present, injecting the ISR's
-        // faulty clear still froze the drain permanently (drain=9/8 across 35 s,
-        // zero console bytes). The load-bearing fix is the ISR no longer
-        // clearing status bits it did not observe; this only shortens the path
-        // when the endpoint is already free.
+        // Ready on the actual condition too, so the common case needs no
+        // interrupt. NOT a safety net for a lost wakeup: a future that is never
+        // woken is never polled, so this cannot rescue an already-parked task.
         if self.data_free() || self.event_bit_is_clear() {
             Poll::Ready(())
         } else {
@@ -777,12 +779,9 @@ struct UsbSerialJtagReadFuture<'d> {
 
 impl<'d> UsbSerialJtagReadFuture<'d> {
     fn new(peripheral: USB_DEVICE<'d>) -> Self {
-        // Set the interrupt enable bit for the USB_SERIAL_JTAG_SERIAL_OUT_RECV_PKT
-        // interrupt
-        peripheral
-            .register_block()
-            .int_ena()
-            .modify(|_, w| w.serial_out_recv_pkt().set_bit());
+        // Lookup hoisted so only the read-modify-write is locked. See `INT_ENA_LOCK`.
+        let int_ena = peripheral.register_block().int_ena();
+        INT_ENA_LOCK.lock(|| int_ena.modify(|_, w| w.serial_out_recv_pkt().set_bit()));
 
         Self { peripheral }
     }
@@ -795,6 +794,20 @@ impl<'d> UsbSerialJtagReadFuture<'d> {
             .serial_out_recv_pkt()
             .bit_is_clear()
     }
+
+    /// Whether the OUT endpoint holds a byte: the condition the waiter cares
+    /// about, read from the hardware rather than inferred from an interrupt.
+    ///
+    /// Mirrors the TX future's `data_free`. Readiness expressed as "the handler
+    /// cleared my enable bit" describes interrupt bookkeeping, not the endpoint.
+    fn data_avail(&self) -> bool {
+        self.peripheral
+            .register_block()
+            .ep1_conf()
+            .read()
+            .serial_out_ep_data_avail()
+            .bit_is_set()
+    }
 }
 
 impl core::future::Future for UsbSerialJtagReadFuture<'_> {
@@ -805,7 +818,10 @@ impl core::future::Future for UsbSerialJtagReadFuture<'_> {
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<Self::Output> {
         WAKER_RX.register(cx.waker());
-        if self.event_bit_is_clear() {
+        // Unlike the TX side's check this one is load-bearing against a lost
+        // wakeup: in the `INT_ENA_LOCK` race the reader IS woken and polled, and
+        // only reports `Pending` because the enable bit was resurrected under it.
+        if self.data_avail() || self.event_bit_is_clear() {
             Poll::Ready(())
         } else {
             Poll::Pending
@@ -834,21 +850,12 @@ impl<'d> UsbSerialJtag<'d, Async> {
 impl UsbSerialJtagTx<'_, Async> {
     async fn write_async(&mut self, words: &[u8]) -> Result<(), Error> {
         for chunk in words.chunks(64) {
-            // Wait for room BEFORE stuffing the endpoint. Bytes written while
-            // `serial_in_ep_data_free` is clear are discarded by the hardware,
-            // and this API cannot report that: its `Error` is `Infallible`, so
-            // the caller sees a successful write and the data is simply gone.
+            // Wait for room BEFORE stuffing the endpoint: bytes written while
+            // `serial_in_ep_data_free` is clear are discarded, and `Error =
+            // Infallible` means the caller sees a successful write. The blocking
+            // path always had this check; only the async path omitted it.
             //
-            // The blocking path has always had this check -- `write_byte_nb`
-            // returns `WouldBlock` rather than writing into a full FIFO. Only
-            // the async path omitted it, which is why the loss appears solely
-            // under an async console and only when the host stops draining:
-            // whole 64-byte chunks vanish mid-line with nothing counted
-            // anywhere.
-            //
-            // `while`, not `if`: re-read the hardware after every wake so a
-            // spurious wake cannot let a write through into a still-full
-            // endpoint.
+            // `while`, not `if`, so a spurious wake cannot let a write through.
             while self
                 .regs()
                 .ep1_conf()
@@ -984,28 +991,25 @@ fn async_interrupt_handler() {
     let tx = interrupts.serial_in_empty().bit_is_set();
     let rx = interrupts.serial_out_recv_pkt().bit_is_set();
 
-    if tx {
-        usb.int_ena().modify(|_, w| w.serial_in_empty().clear_bit());
-    }
-    if rx {
-        usb.int_ena()
-            .modify(|_, w| w.serial_out_recv_pkt().clear_bit());
+    // One `modify` for both bits, and no lock at all on a spurious entry.
+    // See `INT_ENA_LOCK`.
+    if tx || rx {
+        INT_ENA_LOCK.lock(|| {
+            usb.int_ena().modify(|_, w| {
+                if tx {
+                    w.serial_in_empty().clear_bit();
+                }
+                if rx {
+                    w.serial_out_recv_pkt().clear_bit();
+                }
+                w
+            });
+        });
     }
 
-    // Clear ONLY what this entry actually observed set.
-    //
-    // The status was sampled once, above. Clearing a bit that was not in that
-    // sample throws away an event nobody has handled: the endpoint can drain
-    // between the `int_st` read and this write, setting `serial_in_empty` after
-    // `tx` was read as false. The unconditional clear then wipes it without
-    // waking `WAKER_TX` and without clearing `int_ena`, so the TX future — which
-    // is ready only once the ISR clears that enable bit — waits forever for an
-    // event that has already been discarded.
-    //
-    // It needs an RX interrupt to land in that window, which is why it is rare
-    // and why it shows up under a host that writes to the port: on a CoreS3
-    // driving ISO 15118 sessions the console died permanently twice, in both
-    // directions, while smoltcp kept answering TCP on the same chip.
+    // Clear ONLY what this entry observed set. `int_st` was sampled once above,
+    // and the endpoint can drain before this write — clearing an unobserved bit
+    // discards an event nobody handled, with no wake and `int_ena` left set.
     usb.int_clr().write(|w| {
         if tx {
             w.serial_in_empty().clear_bit_by_one();
