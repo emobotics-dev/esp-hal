@@ -701,6 +701,7 @@ where
 
 // Static instance of the waker for each component of the peripheral:
 static WAKER_TX: AtomicWaker = AtomicWaker::new();
+
 static WAKER_RX: AtomicWaker = AtomicWaker::new();
 
 #[must_use = "futures do nothing unless you `.await` or poll them"]
@@ -728,6 +729,18 @@ impl<'d> UsbSerialJtagWriteFuture<'d> {
             .serial_in_empty()
             .bit_is_clear()
     }
+
+    /// Whether the IN endpoint currently has room -- the condition the waiter
+    /// actually cares about, read from the hardware rather than inferred from
+    /// whether an interrupt happened to fire.
+    fn data_free(&self) -> bool {
+        self.peripheral
+            .register_block()
+            .ep1_conf()
+            .read()
+            .serial_in_ep_data_free()
+            .bit_is_set()
+    }
 }
 
 impl core::future::Future for UsbSerialJtagWriteFuture<'_> {
@@ -738,7 +751,18 @@ impl core::future::Future for UsbSerialJtagWriteFuture<'_> {
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<Self::Output> {
         WAKER_TX.register(cx.waker());
-        if self.event_bit_is_clear() {
+        // Ready on the ACTUAL condition as well as on the interrupt having
+        // fired, so the common case needs no interrupt at all.
+        //
+        // **This is not a safety net for a lost wakeup, and must not be
+        // described as one.** A future that is never woken is never polled, so
+        // checking the hardware here cannot rescue a task already parked --
+        // measured 2026-07-31: with this check present, injecting the ISR's
+        // faulty clear still froze the drain permanently (drain=9/8 across 35 s,
+        // zero console bytes). The load-bearing fix is the ISR no longer
+        // clearing status bits it did not observe; this only shortens the path
+        // when the endpoint is already free.
+        if self.data_free() || self.event_bit_is_clear() {
             Poll::Ready(())
         } else {
             Poll::Pending
@@ -810,14 +834,37 @@ impl<'d> UsbSerialJtag<'d, Async> {
 impl UsbSerialJtagTx<'_, Async> {
     async fn write_async(&mut self, words: &[u8]) -> Result<(), Error> {
         for chunk in words.chunks(64) {
+            // Wait for room BEFORE stuffing the endpoint. Bytes written while
+            // `serial_in_ep_data_free` is clear are discarded by the hardware,
+            // and this API cannot report that: its `Error` is `Infallible`, so
+            // the caller sees a successful write and the data is simply gone.
+            //
+            // The blocking path has always had this check -- `write_byte_nb`
+            // returns `WouldBlock` rather than writing into a full FIFO. Only
+            // the async path omitted it, which is why the loss appears solely
+            // under an async console and only when the host stops draining:
+            // whole 64-byte chunks vanish mid-line with nothing counted
+            // anywhere.
+            //
+            // `while`, not `if`: re-read the hardware after every wake so a
+            // spurious wake cannot let a write through into a still-full
+            // endpoint.
+            while self
+                .regs()
+                .ep1_conf()
+                .read()
+                .serial_in_ep_data_free()
+                .bit_is_clear()
+            {
+                UsbSerialJtagWriteFuture::new(self.peripheral.reborrow()).await;
+            }
+
             for byte in chunk {
                 self.regs()
                     .ep1()
                     .write(|w| unsafe { w.rdwr_byte().bits(*byte) });
             }
             self.regs().ep1_conf().modify(|_, w| w.wr_done().set_bit());
-
-            UsbSerialJtagWriteFuture::new(self.peripheral.reborrow()).await;
         }
 
         Ok(())
@@ -945,11 +992,28 @@ fn async_interrupt_handler() {
             .modify(|_, w| w.serial_out_recv_pkt().clear_bit());
     }
 
+    // Clear ONLY what this entry actually observed set.
+    //
+    // The status was sampled once, above. Clearing a bit that was not in that
+    // sample throws away an event nobody has handled: the endpoint can drain
+    // between the `int_st` read and this write, setting `serial_in_empty` after
+    // `tx` was read as false. The unconditional clear then wipes it without
+    // waking `WAKER_TX` and without clearing `int_ena`, so the TX future — which
+    // is ready only once the ISR clears that enable bit — waits forever for an
+    // event that has already been discarded.
+    //
+    // It needs an RX interrupt to land in that window, which is why it is rare
+    // and why it shows up under a host that writes to the port: on a CoreS3
+    // driving ISO 15118 sessions the console died permanently twice, in both
+    // directions, while smoltcp kept answering TCP on the same chip.
     usb.int_clr().write(|w| {
-        w.serial_in_empty()
-            .clear_bit_by_one()
-            .serial_out_recv_pkt()
-            .clear_bit_by_one()
+        if tx {
+            w.serial_in_empty().clear_bit_by_one();
+        }
+        if rx {
+            w.serial_out_recv_pkt().clear_bit_by_one();
+        }
+        w
     });
 
     if rx {
