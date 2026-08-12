@@ -283,16 +283,16 @@ where
 
     /// Listen for RX-PACKET-RECV interrupts
     pub fn listen_rx_packet_recv_interrupt(&mut self) {
-        self.regs()
-            .int_ena()
-            .modify(|_, w| w.serial_out_recv_pkt().set_bit());
+        // `&mut self` excludes another caller, not the handler. See `INT_ENA_LOCK`.
+        let int_ena = self.regs().int_ena();
+        INT_ENA_LOCK.lock(|| int_ena.modify(|_, w| w.serial_out_recv_pkt().set_bit()));
     }
 
     /// Stop listening for RX-PACKET-RECV interrupts
     pub fn unlisten_rx_packet_recv_interrupt(&mut self) {
-        self.regs()
-            .int_ena()
-            .modify(|_, w| w.serial_out_recv_pkt().clear_bit());
+        // Guarded: see `INT_ENA_LOCK`.
+        let int_ena = self.regs().int_ena();
+        INT_ENA_LOCK.lock(|| int_ena.modify(|_, w| w.serial_out_recv_pkt().clear_bit()));
     }
 
     /// Checks if RX-PACKET-RECV interrupt is set
@@ -455,9 +455,9 @@ pub trait Instance: crate::private::Sealed {
 
     /// Disable all transmit interrupts for the peripheral
     fn disable_tx_interrupts(&self) {
-        self.register_block()
-            .int_ena()
-            .modify(|_, w| w.serial_in_empty().clear_bit());
+        // Guarded: see `INT_ENA_LOCK`.
+        let int_ena = self.register_block().int_ena();
+        INT_ENA_LOCK.lock(|| int_ena.modify(|_, w| w.serial_in_empty().clear_bit()));
 
         self.register_block()
             .int_clr()
@@ -466,9 +466,9 @@ pub trait Instance: crate::private::Sealed {
 
     /// Disable all receive interrupts for the peripheral
     fn disable_rx_interrupts(&self) {
-        self.register_block()
-            .int_ena()
-            .modify(|_, w| w.serial_out_recv_pkt().clear_bit());
+        // Guarded: see `INT_ENA_LOCK`.
+        let int_ena = self.register_block().int_ena();
+        INT_ENA_LOCK.lock(|| int_ena.modify(|_, w| w.serial_out_recv_pkt().clear_bit()));
 
         self.register_block()
             .int_clr()
@@ -702,11 +702,25 @@ where
 
 // Static instance of the waker for each component of the peripheral:
 static WAKER_TX: AtomicWaker = AtomicWaker::new();
+
 static WAKER_RX: AtomicWaker = AtomicWaker::new();
 // TX and RX interrupts are enabled independently. Once either is enabled, its
 // handler can preempt the other side's INT_ENA read-modify-write and cause
 // stale enable bits to be restored. Serialize all INT_ENA updates.
 static INT_ENA_LOCK: RawMutex = RawMutex::new();
+
+/// Serialises every read-modify-write of `int_ena`.
+///
+/// `int_ena` holds the TX and RX enables in one register, and both task context
+/// (a future arming) and the handler (a future releasing) `modify()` it. The
+/// handler preempts task context between the read and the write, so the stale
+/// write-back resurrects a bit the handler just cleared. The woken waiter then
+/// polls, finds its readiness bit set again, and parks forever on data already
+/// in the endpoint -- a console deaf while transmitting perfectly.
+///
+/// `RawMutex` disables interrupts, which is the guarantee required.
+/// `esp_hal::timer::timg` and `systimer` guard their own `int_ena` the same way.
+static INT_ENA_LOCK: esp_sync::RawMutex = esp_sync::RawMutex::new();
 
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 struct UsbSerialJtagWriteFuture<'d> {
@@ -780,6 +794,20 @@ impl<'d> UsbSerialJtagReadFuture<'d> {
             .serial_out_recv_pkt()
             .bit_is_clear()
     }
+
+    /// Whether the OUT endpoint holds a byte: the condition the waiter cares
+    /// about, read from the hardware rather than inferred from an interrupt.
+    ///
+    /// Mirrors the TX future's `data_free`. Readiness expressed as "the handler
+    /// cleared my enable bit" describes interrupt bookkeeping, not the endpoint.
+    fn data_avail(&self) -> bool {
+        self.peripheral
+            .register_block()
+            .ep1_conf()
+            .read()
+            .serial_out_ep_data_avail()
+            .bit_is_set()
+    }
 }
 
 impl core::future::Future for UsbSerialJtagReadFuture<'_> {
@@ -790,7 +818,10 @@ impl core::future::Future for UsbSerialJtagReadFuture<'_> {
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<Self::Output> {
         WAKER_RX.register(cx.waker());
-        if self.event_bit_is_clear() {
+        // Unlike the TX side's check this one is load-bearing against a lost
+        // wakeup: in the `INT_ENA_LOCK` race the reader IS woken and polled, and
+        // only reports `Pending` because the enable bit was resurrected under it.
+        if self.data_avail() || self.event_bit_is_clear() {
             Poll::Ready(())
         } else {
             Poll::Pending
@@ -961,23 +992,33 @@ fn async_interrupt_handler() {
     let tx = interrupts.serial_in_empty().bit_is_set();
     let rx = interrupts.serial_out_recv_pkt().bit_is_set();
 
-    INT_ENA_LOCK.lock(|| {
-        usb.int_ena().modify(|_, w| {
-            if tx {
-                w.serial_in_empty().clear_bit();
-            }
-            if rx {
-                w.serial_out_recv_pkt().clear_bit();
-            }
-            w
+    // One `modify` for both bits, and no lock at all on a spurious entry.
+    // See `INT_ENA_LOCK`.
+    if tx || rx {
+        INT_ENA_LOCK.lock(|| {
+            usb.int_ena().modify(|_, w| {
+                if tx {
+                    w.serial_in_empty().clear_bit();
+                }
+                if rx {
+                    w.serial_out_recv_pkt().clear_bit();
+                }
+                w
+            });
         });
-    });
+    }
 
+    // Clear ONLY what this entry observed set. `int_st` was sampled once above,
+    // and the endpoint can drain before this write — clearing an unobserved bit
+    // discards an event nobody handled, with no wake and `int_ena` left set.
     usb.int_clr().write(|w| {
-        w.serial_in_empty()
-            .clear_bit_by_one()
-            .serial_out_recv_pkt()
-            .clear_bit_by_one()
+        if tx {
+            w.serial_in_empty().clear_bit_by_one();
+        }
+        if rx {
+            w.serial_out_recv_pkt().clear_bit_by_one();
+        }
+        w
     });
 
     if rx {
