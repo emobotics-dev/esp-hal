@@ -315,6 +315,23 @@ impl<'d> SpiDma<'d, Async> {
 
                 this.driver.state.waker.register(cx.waker());
                 this.driver.enable_listen(Self::DONE_EVENTS, true);
+                // Upstream #6107: on esp32/s2 enable and status share a
+                // register, so the RMW above can erase a completion that
+                // landed between the read and the write. Re-check.
+                if !this.driver.interrupts().is_disjoint(Self::DONE_EVENTS)
+                    || !this.driver.busy()
+                {
+                    #[cfg(any(esp32, esp32s2))]
+                    if this.driver.busy() {
+                        this.busy_polls = this.busy_polls.saturating_add(1);
+                        if this.busy_polls < Self::BUSY_POLL_BUDGET {
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
+                    }
+                    this.driver.clear_interrupts(Self::DONE_EVENTS);
+                    return Poll::Ready(());
+                }
                 Poll::Pending
             }
         }
