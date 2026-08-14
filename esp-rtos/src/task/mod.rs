@@ -343,6 +343,72 @@ impl Drop for ThreadLocalData {
     }
 }
 
+/// Sentinel painted into a fresh task stack so [`stack_usage`] can find how
+/// deep that task has ever gone. Not a plausible value for real stack contents
+/// (not a valid pointer, not a small integer, not a return address).
+pub(crate) const STACK_PAINT: u32 = 0xA5A5_A5A5;
+
+/// One task's stack high-water measurement, from [`stack_usage`].
+#[derive(Copy, Clone, Debug)]
+pub struct TaskStackUsage {
+    /// Low address of the stack allocation.
+    pub base: usize,
+    /// Total bytes allocated for the stack.
+    pub size_bytes: usize,
+    /// Bytes below the high-water mark — i.e. how deep this task has ever run.
+    pub used_bytes: usize,
+}
+
+/// Report the stack high-water mark of every heap-allocated task.
+///
+/// Answers "is this thread's stack big enough?" with a number instead of an
+/// argument. Static analysis cannot: the deep paths here are LVGL's C draw
+/// code and async dispatch, both of which go through function pointers a
+/// call-graph walker cannot follow.
+///
+/// Only tasks created through [`Scheduler::create_task`] are reported — the
+/// main task's stack is linker-provided and already dirty before the scheduler
+/// exists, so a high-water figure for it would be meaningless here.
+///
+/// Walks the task list under the scheduler lock; call it from a low-rate
+/// reporting task, not a hot path.
+#[cfg(feature = "alloc")]
+pub fn stack_usage(mut f: impl FnMut(TaskStackUsage)) {
+    let guard_words = esp_config::esp_config_int!(usize, "ESP_HAL_CONFIG_STACK_GUARD_OFFSET") / 4;
+    crate::SCHEDULER.with(|scheduler| {
+        // Walk the list directly rather than via `TaskList::iter`, which is
+        // gated behind `rtos-trace`. Un-gating it, or turning that feature on,
+        // would cost more than these three lines — this is in the same module,
+        // so the list internals are already in scope.
+        let mut current = scheduler.all_tasks.head;
+        while let Some(task) = current {
+            current = TaskAllocListElement::next(task);
+            // SAFETY: the task list holds live tasks and we hold the lock.
+            let t = unsafe { task.as_ref() };
+            if !t.heap_allocated {
+                continue;
+            }
+            let words = t.stack.len();
+            let base = t.stack.cast::<u32>();
+            let first = guard_words + 1;
+            let mut untouched = 0usize;
+            for i in first..words {
+                // SAFETY: `i` is inside the stack allocation.
+                if unsafe { base.add(i).read() } == STACK_PAINT {
+                    untouched += 1;
+                } else {
+                    break;
+                }
+            }
+            f(TaskStackUsage {
+                base: base as usize,
+                size_bytes: words * 4,
+                used_bytes: (words - first - untouched) * 4,
+            });
+        }
+    })
+}
+
 #[repr(C)]
 pub(crate) struct Task {
     pub cpu_context: CpuContext,
@@ -484,6 +550,24 @@ impl Task {
 
         let stack_words = core::ptr::slice_from_raw_parts_mut(stack_bottom, stack_len_bytes / 4);
         let stack_top = unsafe { stack_bottom.add(stack_words.len()).cast() };
+
+        // Paint the usable stack so its high-water mark can be measured later
+        // (`stack_usage`). Stacks grow DOWN from `stack_top`, so untouched
+        // memory is what still holds the sentinel at the LOW end. Done here,
+        // before `new_task_context` lays down the initial frame at the top and
+        // before the guard word goes in, so neither is clobbered. Painting
+        // starts one word ABOVE the guard so the scan never trips over it.
+        //
+        // Costs one pass over the stack at task creation and nothing at
+        // runtime. Only heap-allocated tasks are painted; the main task's
+        // stack is linker-provided and already in use by the time we get here,
+        // which is why `stack_usage` reports only `heap_allocated` tasks.
+        unsafe {
+            let first = stack_guard_offset / 4 + 1;
+            for i in first..(stack_len_bytes / 4) {
+                stack_bottom.add(i).write(MaybeUninit::new(STACK_PAINT));
+            }
+        }
 
         let mut task = Task {
             cpu_context: new_task_context(task_fn, param, stack_top),
