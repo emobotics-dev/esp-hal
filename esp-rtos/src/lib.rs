@@ -194,6 +194,8 @@ pub use macros::main;
 use scheduler::ActiveCores;
 pub(crate) use scheduler::SCHEDULER;
 pub use task::CurrentThreadHandle;
+#[cfg(feature = "alloc")]
+pub use task::{TaskStackUsage, stack_usage};
 
 use crate::{task::IdleFn, timer::TimeDriver};
 
