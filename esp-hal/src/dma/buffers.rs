@@ -1671,7 +1671,7 @@ unsafe impl DmaRxBuffer for NoBuffer {
 #[cfg_attr(not(any(aes_dma, spi_master_supports_dma)), expect(unused))]
 pub(crate) unsafe fn prepare_for_tx(
     descriptors: &mut [DmaDescriptor],
-    mut data: NonNull<[u8]>,
+    data: NonNull<[u8]>,
     block_size: usize,
 ) -> Result<(NoBuffer, usize), DmaError> {
     let alignment =
@@ -1707,7 +1707,10 @@ pub(crate) unsafe fn prepare_for_tx(
     let mut descriptors = unwrap!(DescriptorSet::new(descriptors));
     // TODO: it would be best if this function returned the amount of data that could be linked
     // up.
-    unwrap!(descriptors.link_with_buffer(unsafe { data.as_mut() }, chunk_size));
+    // TX: the DMA reads this buffer, and the caller's pointer may carry
+    // read-only provenance (`write_async` takes `&[u8]`). Minting `&mut` here
+    // retags Unique from SharedReadOnly — UB. Read-only link instead.
+    unwrap!(descriptors.link_with_readonly_buffer(unsafe { data.as_ref() }, chunk_size));
     // ESP32 LX6 PDMA quirk: SPI peripheral's TransferDone IRQ never fires when
     // the descriptor's `length` field is not a 4-byte multiple. Round it up;
     // MOSI_DBITLEN is set separately to the exact bit count (`configure_datalen`),
@@ -1810,12 +1813,13 @@ pub(crate) unsafe fn prepare_for_tx_with_pad(
 
     // Set up bulk descriptors (if any) via the existing helper.
     if bulk_len > 0 {
+        // Shared, not mut: same provenance reason as `prepare_for_tx`.
         let bulk_slice = unsafe {
-            core::slice::from_raw_parts_mut(data.as_ptr().cast::<u8>(), bulk_len)
+            core::slice::from_raw_parts(data.as_ptr().cast::<u8>(), bulk_len)
         };
         let mut bulk_set =
             unwrap!(DescriptorSet::new(&mut descriptors[..bulk_desc_count]));
-        unwrap!(bulk_set.link_with_buffer(bulk_slice, chunk_size));
+        unwrap!(bulk_set.link_with_readonly_buffer(bulk_slice, chunk_size));
         unwrap!(bulk_set.set_tx_length(bulk_len, chunk_size));
         for desc in bulk_set.linked_iter_mut() {
             desc.reset_for_tx(false); // suc_eof cleared — pad is last.

@@ -393,8 +393,27 @@ pub fn stack_usage(mut f: impl FnMut(TaskStackUsage)) {
             let first = guard_words + 1;
             let mut untouched = 0usize;
             for i in first..words {
-                // SAFETY: `i` is inside the stack allocation.
-                if unsafe { base.add(i).read() } == STACK_PAINT {
+                // ATOMIC read, not a plain one. These are the stacks of tasks
+                // that may be RUNNING — including on the other core, which
+                // `SCHEDULER.with` does not halt — so a plain `read()` here
+                // races with that task's own pushes and pops. A data race is UB
+                // no matter how benign the value is, and the value genuinely is
+                // benign: this is a high-water-mark heuristic, so a stale or
+                // torn word costs at most an imprecise number.
+                //
+                // Relaxed because there is nothing to order against; we want
+                // the read to be defined, not synchronised. The words are
+                // initialised — the stack is painted with STACK_PAINT at spawn
+                // (see `stack_bottom.add(i).write(...)` below) — so reading them
+                // as `u32` is valid.
+                //
+                // SAFETY: `i` is inside the stack allocation, which outlives
+                // this scan because we hold the task-list lock.
+                let word = unsafe {
+                    core::sync::atomic::AtomicU32::from_ptr(base.add(i))
+                        .load(core::sync::atomic::Ordering::Relaxed)
+                };
+                if word == STACK_PAINT {
                     untouched += 1;
                 } else {
                     break;
