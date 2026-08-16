@@ -1,7 +1,18 @@
 INCLUDE exception.x
 
 SECTIONS {
-  .rotext_dummy (NOLOAD) :
+  /* READONLY, not NOLOAD: a NOLOAD output section gets SHF_WRITE, and this one
+   * shares a LOAD segment with .text (SHF_EXECINSTR), so the segment came out
+   * RWX — which ld reports as "has a LOAD segment with RWX permissions". That
+   * warning survives a -D warnings build, because the `linker_messages` lint
+   * documents that it ignores it.
+   *
+   * READONLY keeps the section SHT_NOBITS here (it has no content statements,
+   * only a `.` advance), so the image does not grow. Measured, not assumed —
+   * the combined `READONLY (TYPE = SHT_NOBITS)` form parses but silently drops
+   * the readonly half, and plain `TYPE =` does too; only bare READONLY works.
+   */
+  .rotext_dummy (READONLY) :
   {
     /* This dummy section represents the .rodata section within ROTEXT.
     * Since the same physical memory is mapped to both DROM and IROM,
