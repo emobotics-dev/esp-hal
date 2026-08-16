@@ -828,6 +828,32 @@ impl<'a> DescriptorSet<'a> {
         Self::set_up_buffer_ptrs(buffer, &mut self.descriptors, chunk_size)
     }
 
+    /// Link descriptors to a buffer the DMA will only READ (a TX transfer).
+    ///
+    /// Exists because the `&mut` variant is over-strong for that direction and
+    /// was UB at the call site. `SpiBus::write_async(words: &[u8])` derives its
+    /// pointer from a SHARED reference, so the pointer carries SharedReadOnly
+    /// provenance; `prepare_for_tx` then minted a `&mut [u8]` from it, which is
+    /// retagging Unique from SharedReadOnly.
+    ///
+    /// Nothing needed that `&mut`: descriptor set-up only reads `len()` and
+    /// stores an address. `desc.buffer` is typed `*mut u8` for the hardware's
+    /// benefit, and storing a pointer of read-only provenance there is fine —
+    /// no Rust write ever happens through it, and the DMA is reading.
+    fn link_with_readonly_buffer(
+        &mut self,
+        buffer: &[u8],
+        chunk_size: usize,
+    ) -> Result<(), DmaBufError> {
+        let descriptors =
+            Self::descriptors_for_buffer_len(&mut self.descriptors, buffer.len(), chunk_size)?;
+        for (desc, chunk) in descriptors.iter_mut().zip(buffer.chunks(chunk_size)) {
+            desc.set_size(chunk.len());
+            desc.buffer = chunk.as_ptr().cast_mut();
+        }
+        Ok(())
+    }
+
     /// Prepares descriptors for transferring `len` bytes of data.
     ///
     /// See [`Self::set_up_descriptors`] for more details.

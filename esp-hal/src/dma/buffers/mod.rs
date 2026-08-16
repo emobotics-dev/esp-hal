@@ -1935,7 +1935,7 @@ unsafe impl DmaRxBuffer for NoBuffer {
 #[cfg_attr(not(any(aes_supports_dma, spi_master_supports_dma)), expect(unused))]
 pub(crate) unsafe fn prepare_for_tx(
     descriptors: &mut [DmaDescriptor],
-    mut data: NonNull<[u8]>,
+    data: NonNull<[u8]>,
     block_size: usize,
 ) -> Result<(NoBuffer, usize), DmaError> {
     let alignment =
@@ -1976,7 +1976,10 @@ pub(crate) unsafe fn prepare_for_tx(
     let mut descriptors = unwrap!(DescriptorSet::new(descriptors));
     // TODO: it would be best if this function returned the amount of data that could be linked
     // up.
-    unwrap!(descriptors.link_with_buffer(unsafe { data.as_mut() }, chunk_size));
+    // TX: the DMA reads this buffer, and the caller's pointer may carry
+    // read-only provenance (`write_async` takes `&[u8]`). Minting `&mut` here
+    // retags Unique from SharedReadOnly — UB. Read-only link instead.
+    unwrap!(descriptors.link_with_readonly_buffer(unsafe { data.as_ref() }, chunk_size));
     unwrap!(descriptors.set_tx_length(data_len, chunk_size));
 
     for desc in descriptors.linked_iter_mut() {
