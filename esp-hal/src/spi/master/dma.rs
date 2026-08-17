@@ -38,23 +38,25 @@ use crate::dma::prepare_for_tx;
 
 const MAX_DMA_SIZE: usize = 32736;
 
-/// Diagnostics for `SpiDma::cancel_and_quiesce` — how often an async transfer
-/// was cancelled mid-flight, how long the engine took to actually stop, and how
-/// often it never did (budget exhausted → DMA reset). Counters only; they make
-/// the cancellation path observable instead of inferred.
+/// Async transfers cancelled mid-flight — non-zero means an SD op timed out.
 pub static CANCEL_QUIESCE_HITS: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(0);
-/// Worst spin count seen in `cancel_and_quiesce`.
+/// Worst spin seen waiting for a cancelled engine to stop.
 pub static CANCEL_QUIESCE_MAX_POLLS: portable_atomic::AtomicU32 =
     portable_atomic::AtomicU32::new(0);
-/// Times the quiesce budget was exhausted and the DMA had to be reset.
+/// Cancels where the engine never stopped and the DMA had to be reset.
 pub static CANCEL_QUIESCE_RESETS: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(0);
+
+/// Where `wait_for_idle_async` is: 1 = RX future, 2 = TransferDone, 0 = out.
+pub static SPI_WAIT_PHASE: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(0);
+/// Bumped on every [`SPI_WAIT_PHASE`] change; frozen means parked.
+pub static SPI_WAIT_SEQ: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(0);
+/// TransferDone polls. At phase 2: frozen = lost wakeup, rising = the
+/// transfer is polled but never completes.
+pub static FUT_POLLS: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(0);
 
 /// RX DMA descriptor faults recovered in `wait_for_idle_async` (esp-hal #491).
 pub static RX_DSCR_FAULTS: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(0);
-/// esp32/esp32s2 `usr`-stuck faults recovered after `TransferDone` (esp-hal
-/// #491). Each one is a wedged SPI peripheral that had to be reset, and the
-/// transfer it belonged to returns bad/short data for sdspi to retry — so a
-/// rising count is the SPI engine failing, not the card being slow.
+/// esp32 `usr`-stuck faults recovered after `TransferDone` (esp-hal #491).
 pub static USR_STUCK_RECOVERIES: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(0);
 
 impl<'d> Spi<'d, Blocking> {
@@ -419,20 +421,18 @@ impl<'d> SpiDma<'d, Async> {
     }
 
     async fn wait_for_idle_async(&mut self) {
+        fn wphase(p: u32) {
+            SPI_WAIT_PHASE.store(p, Ordering::Relaxed);
+            SPI_WAIT_SEQ.fetch_add(1, Ordering::Relaxed);
+        }
         if self.dma_driver().state.rx_transfer_in_progress.get() {
+            wphase(1);
             let rx_result = DmaRxFuture::new(&mut self.channel.rx).await;
             if rx_result.is_err() {
-                // esp-hal #491 / docs/spi-dma-and-wakeup.md §7: the RX DMA
-                // descriptor faulted (inlink_dscr_error) — confirmed via
-                // dma_int_raw on fire27 under concurrent BLE+I²C bus traffic.
-                // The SPI never raises TransferDone and its `usr` (busy) bit
-                // stays stuck, so any later wait spins FOREVER (silent :format
-                // wedge: no panic, no timeout). Recover the peripheral so the
-                // next op isn't blocked: reset the DMA (clears the in/out/AHBM
-                // FIFOs holding the SPI data path), then cancel/abort the SPI
-                // (datalen=1 + update) so `usr` clears. The caller then sees
-                // bad/short data (CRC mismatch) → a recoverable error that
-                // sdspi retries at the command level, instead of a hang.
+                // RX descriptor fault: `usr` stays stuck and no TransferDone
+                // ever arrives, so recover the peripheral rather than wait
+                // forever. Bad/short data becomes a CRC error sdspi retries.
+                // esp-hal #491 / docs/spi-dma-and-wakeup.md §7.
                 self.dma_driver().reset_dma();
                 self.cancel_transfer();
                 RX_DSCR_FAULTS.fetch_add(1, Ordering::Relaxed);
@@ -452,14 +452,9 @@ impl<'d> SpiDma<'d, Async> {
         impl Fut {
             const DONE_EVENTS: EnumSet<SpiInterrupt> =
                 enumset::enum_set!(SpiInterrupt::TransferDone);
-            // After TransferDone the `usr` (busy) bit normally clears within a
-            // handful of polls. Bound the re-poll so a STUCK `usr` (PDMA
-            // usr-stuck fault, esp-hal #491) can't busy-re-wake forever: an
-            // unbounded `wake_by_ref` self-wake pins the interrupt-executor and
-            // masks the embassy time-driver IRQ, so `with_timeout` never fires
-            // and the whole core wedges (silent :format hang). The budget is
-            // >>> normal settling, so it never false-trips; on exhausting it we
-            // give up and the caller resets+cancels the wedged peripheral.
+            // Bound the post-DONE `usr` re-poll: unbounded self-waking pins
+            // the interrupt executor and masks the timer, so `with_timeout`
+            // never fires and the core wedges silently (esp-hal #491).
             #[cfg(any(esp32, esp32s2))]
             const BUSY_POLL_BUDGET: u32 = 50_000;
         }
@@ -468,6 +463,7 @@ impl<'d> SpiDma<'d, Async> {
 
             fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
                 let this = self.get_mut();
+                FUT_POLLS.fetch_add(1, Ordering::Relaxed);
                 if !this.driver.interrupts().is_disjoint(Self::DONE_EVENTS) {
                     #[cfg(any(esp32, esp32s2))]
                     // Need to poll for done-ness even after interrupt fires —
@@ -499,6 +495,7 @@ impl<'d> SpiDma<'d, Async> {
         }
 
         if !self.is_done() {
+            wphase(2);
             Fut {
                 driver: self.driver(),
                 #[cfg(any(esp32, esp32s2))]
@@ -529,15 +526,9 @@ impl<'d> SpiDma<'d, Async> {
             self.dma_driver().state.tx_transfer_in_progress.set(false);
         }
 
-        // The caller reads the DMA-written RX buffer straight after this
-        // returns, so the completion check must be ordered before those loads.
-        // The blocking `wait_for_idle` has always ended with this fence; the
-        // async path — the one the SD driver actually uses — did not, leaving
-        // the buffer reads free to be hoisted above the done-check. Whether
-        // that actually happens is an inlining decision, which is exactly why
-        // the resulting fault moved under semantically inert edits: a stale
-        // busy-token byte makes the driver wait out every internal bound and
-        // report a >20 s "stall" on a card that was never slow.
+        wphase(0);
+        // The caller reads the DMA-written buffer next; this orders those
+        // loads after the done-check, as every other completion path does.
         fence(Ordering::Acquire);
     }
 }
@@ -588,11 +579,8 @@ where
         }
     }
 
-    /// Spin budget for `cancel_and_quiesce`. An aborted transfer only has to
-    /// drain the burst already in flight (bytes, not a block), so a few
-    /// thousand polls would do; the budget is deliberately far above that so
-    /// it never truncates a legitimate wind-down, and exists solely to bound
-    /// the `usr`-stuck fault rather than to time anything.
+    /// Spin budget for `cancel_and_quiesce`: far above a burst wind-down, so
+    /// it only ever bounds the `usr`-stuck fault.
     const CANCEL_QUIESCE_POLLS: u32 = 50_000;
 
     fn is_done(&self) -> bool {
@@ -718,25 +706,12 @@ where
         }
     }
 
-    /// Cancel a transfer and wait until the hardware has actually stopped.
+    /// Cancel a transfer and wait until the engine has actually stopped.
     ///
-    /// Requesting a stop is not the same as having stopped. `cancel_transfer`
-    /// only *asks* the peripheral to abort (`abort_transfer` truncates the
-    /// datalen, `stop_transfer` sets `outlink_stop`) and then clears the
-    /// in-progress flags immediately — while `is_done` itself concedes the
-    /// peripheral may still be busy, since it checks `busy()` first. Returning
-    /// at that point hands the caller's buffer back while the DMA engine can
-    /// still complete an in-flight burst into it: the async-cancellation data
-    /// race (embassy #1045). The blocking `SpiDmaTransfer::drop` already does
-    /// cancel-then-`wait_for_idle`; the async paths, which are cancelled far
-    /// more often (every `with_timeout` that fires), must do the same.
-    ///
-    /// A destructor cannot be async, so the wait is a spin — but a *bounded*
-    /// one: the esp32 PDMA `usr`-stuck fault (#491, see `wait_for_idle_async`)
-    /// can leave `busy()` set indefinitely, and spinning forever inside a drop
-    /// glue would wedge the core. On exhausting the budget we hard-reset the
-    /// DMA, which stops the engine unconditionally. Either way we do not
-    /// return while the engine may still touch the buffer.
+    /// `cancel_transfer` only requests the stop, so returning before the
+    /// engine halts would hand the buffer back while DMA may still write it.
+    /// The wait is bounded: a `usr`-stuck fault must not spin in drop glue,
+    /// and on exhaustion the DMA is reset instead.
     fn cancel_and_quiesce(&mut self) {
         self.cancel_transfer();
         CANCEL_QUIESCE_HITS.fetch_add(1, Ordering::Relaxed);
