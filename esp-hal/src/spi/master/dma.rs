@@ -262,6 +262,7 @@ impl<'d> SpiDma<'d, Async> {
                 // sdspi retries at the command level, instead of a hang.
                 self.dma_driver().reset_dma();
                 self.cancel_transfer();
+                fence(Ordering::Acquire);
                 return;
             }
             self.dma_driver().state.rx_transfer_in_progress.set(false);
@@ -341,6 +342,7 @@ impl<'d> SpiDma<'d, Async> {
         if self.driver().busy() {
             self.dma_driver().reset_dma();
             self.cancel_transfer();
+            fence(Ordering::Acquire);
             return;
         }
 
@@ -351,6 +353,17 @@ impl<'d> SpiDma<'d, Async> {
             }
             self.dma_driver().state.tx_transfer_in_progress.set(false);
         }
+
+        // The caller reads the DMA-written RX buffer straight after this
+        // returns, so the completion check must be ordered before those loads.
+        // The blocking `wait_for_idle` has always ended with this fence; the
+        // async path — the one the SD driver actually uses — did not, leaving
+        // the buffer reads free to be hoisted above the done-check. Whether
+        // that actually happens is an inlining decision, which is exactly why
+        // the resulting fault moved under semantically inert edits: a stale
+        // busy-token byte makes the driver wait out every internal bound and
+        // report a >20 s "stall" on a card that was never slow.
+        fence(Ordering::Acquire);
     }
 }
 
@@ -399,6 +412,13 @@ where
             state: self.spi().dma_state(),
         }
     }
+
+    /// Spin budget for `cancel_and_quiesce`. An aborted transfer only has to
+    /// drain the burst already in flight (bytes, not a block), so a few
+    /// thousand polls would do; the budget is deliberately far above that so
+    /// it never truncates a legitimate wind-down, and exists solely to bound
+    /// the `usr`-stuck fault rather than to time anything.
+    const CANCEL_QUIESCE_POLLS: u32 = 50_000;
 
     fn is_done(&self) -> bool {
         if self.driver().busy() {
@@ -521,6 +541,42 @@ where
                 state.rx_transfer_in_progress.set(false);
             }
         }
+    }
+
+    /// Cancel a transfer and wait until the hardware has actually stopped.
+    ///
+    /// Requesting a stop is not the same as having stopped. `cancel_transfer`
+    /// only *asks* the peripheral to abort (`abort_transfer` truncates the
+    /// datalen, `stop_transfer` sets `outlink_stop`) and then clears the
+    /// in-progress flags immediately — while `is_done` itself concedes the
+    /// peripheral may still be busy, since it checks `busy()` first. Returning
+    /// at that point hands the caller's buffer back while the DMA engine can
+    /// still complete an in-flight burst into it: the async-cancellation data
+    /// race (embassy #1045). The blocking `SpiDmaTransfer::drop` already does
+    /// cancel-then-`wait_for_idle`; the async paths, which are cancelled far
+    /// more often (every `with_timeout` that fires), must do the same.
+    ///
+    /// A destructor cannot be async, so the wait is a spin — but a *bounded*
+    /// one: the esp32 PDMA `usr`-stuck fault (#491, see `wait_for_idle_async`)
+    /// can leave `busy()` set indefinitely, and spinning forever inside a drop
+    /// glue would wedge the core. On exhausting the budget we hard-reset the
+    /// DMA, which stops the engine unconditionally. Either way we do not
+    /// return while the engine may still touch the buffer.
+    fn cancel_and_quiesce(&mut self) {
+        self.cancel_transfer();
+
+        let mut polls: u32 = 0;
+        while !self.is_done() {
+            polls += 1;
+            if polls >= Self::CANCEL_QUIESCE_POLLS {
+                self.dma_driver().reset_dma();
+                break;
+            }
+        }
+
+        self.dma_driver().state.rx_transfer_in_progress.set(false);
+        self.dma_driver().state.tx_transfer_in_progress.set(false);
+        fence(Ordering::Acquire);
     }
 }
 
@@ -971,7 +1027,7 @@ impl<'d> SpiDmaBus<'d, Async> {
         let empty_tx_buffer = unsafe { self.spi_dma.dma_driver().empty_tx_buffer() };
 
         for chunk in words.chunks_mut(chunk_size) {
-            let mut spi = DropGuard::new(&mut self.spi_dma, |spi| spi.cancel_transfer());
+            let mut spi = DropGuard::new(&mut self.spi_dma, |spi| spi.cancel_and_quiesce());
 
             unsafe { spi.start_dma_transfer(chunk.len(), 0, &mut self.rx_buf, empty_tx_buffer)? };
 
@@ -1035,7 +1091,7 @@ impl<'d> SpiDmaBus<'d, Async> {
                     Ok((mut tx_buf, transferred)) => {
                         let mut spi = DropGuard::new(
                             &mut self.spi_dma,
-                            |spi| spi.cancel_transfer(),
+                            |spi| spi.cancel_and_quiesce(),
                         );
                         unsafe {
                             spi.start_dma_transfer(
@@ -1069,7 +1125,7 @@ impl<'d> SpiDmaBus<'d, Async> {
         words: &[u8],
         empty_rx_buffer: &'static mut DmaRxBuf,
     ) -> Result<(), Error> {
-        let mut spi = DropGuard::new(&mut self.spi_dma, |spi| spi.cancel_transfer());
+        let mut spi = DropGuard::new(&mut self.spi_dma, |spi| spi.cancel_and_quiesce());
         let chunk_size = self.tx_buf.capacity();
         for chunk in words.chunks(chunk_size) {
             self.tx_buf.as_mut_slice()[..chunk.len()].copy_from_slice(chunk);
@@ -1087,7 +1143,7 @@ impl<'d> SpiDmaBus<'d, Async> {
         self.spi_dma.wait_for_idle_async().await;
         self.spi_dma.driver().setup_full_duplex()?;
 
-        let mut spi = DropGuard::new(&mut self.spi_dma, |spi| spi.cancel_transfer());
+        let mut spi = DropGuard::new(&mut self.spi_dma, |spi| spi.cancel_and_quiesce());
         let chunk_size = min(self.tx_buf.capacity(), self.rx_buf.capacity());
 
         let common_length = min(read.len(), write.len());
@@ -1131,7 +1187,7 @@ impl<'d> SpiDmaBus<'d, Async> {
         self.spi_dma.wait_for_idle_async().await;
         self.spi_dma.driver().setup_full_duplex()?;
 
-        let mut spi = DropGuard::new(&mut self.spi_dma, |spi| spi.cancel_transfer());
+        let mut spi = DropGuard::new(&mut self.spi_dma, |spi| spi.cancel_and_quiesce());
         for chunk in words.chunks_mut(self.tx_buf.capacity()) {
             self.tx_buf.as_mut_slice()[..chunk.len()].copy_from_slice(chunk);
 
