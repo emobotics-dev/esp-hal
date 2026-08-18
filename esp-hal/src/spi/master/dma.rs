@@ -1676,6 +1676,31 @@ impl DmaDriver {
             .user()
             .modify(|_, w| w.usr_miso().bit(rx_len > 0).usr_mosi().bit(tx_len > 0));
 
+        // The PDMA reset inside `enable_dma` is GLOBAL: it resets both SPI DMA
+        // channels at once, and Espressif document it as safe only when both
+        // are idle -- that is what `spicommon_dmaworkaround_req_reset` and
+        // `spicommon_dmaworkaround_transfer_active` exist to coordinate in
+        // ESP-IDF. Resetting a channel that is still active leaves the DMA
+        // "confused": the transfer is armed but never delivers, so `usr` clears
+        // with no TransferDone and the driver waits forever on a completion
+        // that cannot come.
+        //
+        // Nothing upstream guarantees idle here. `is_done()` -- which gates
+        // every `wait_for_idle` -- checks `usr` and the RX channel but NEVER
+        // TX, and the async completion path force-stops TX rather than
+        // draining it. So a write can be declared idle with its TX channel
+        // still live, and the next arm resets it mid-flight.
+        //
+        // Stop both channels first so the reset below is safe by construction.
+        // This is the SPI2 pair; a channel belonging to another SPI peripheral
+        // is out of reach here, which is the residual gap versus IDF's
+        // cross-peripheral protocol.
+        #[cfg(dma_kind = "pdma")]
+        {
+            channel.tx.stop_transfer();
+            channel.rx.stop_transfer();
+        }
+
         self.enable_dma();
 
         if rx_len > 0 {
