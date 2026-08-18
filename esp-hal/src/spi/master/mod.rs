@@ -1747,6 +1747,25 @@ impl Driver {
         cfg_if::cfg_if! {
             if #[cfg(esp32)] {
                 self.regs().slave().modify(|_, w| {
+                    // `trans_done` is a STATUS bit in this same register, and it
+                    // is cleared by writing 0 (see `clear_interrupts`). A plain
+                    // read-modify-write therefore writes back whatever the read
+                    // saw -- so a transfer completing between the read and the
+                    // write has its completion ERASED by this call.
+                    //
+                    // That is a real race, not a theoretical one: the completion
+                    // future re-arms the interrupt on every poll, so every wait
+                    // re-runs this RMW alongside a transfer that may finish at
+                    // any instant. The result is `usr` clear, no raw status, no
+                    // ISR, and a waiter parked forever on a completion that
+                    // already happened.
+                    //
+                    // Writing 1 preserves the bit, so force it rather than
+                    // writing the stale read back. esp32 and esp32s2 only: on
+                    // later parts the enable lives in `dma_int_ena`, a separate
+                    // register, and the hazard does not exist -- which is why
+                    // the S3 never reproduced this while the ESP32 did.
+                    w.trans_done().set_bit();
                     for interrupt in interrupts {
                         match interrupt {
                             SpiInterrupt::TransferDone => w.trans_inten().bit(enable),
@@ -1756,6 +1775,10 @@ impl Driver {
                 });
             } else if #[cfg(esp32s2)] {
                 self.regs().slave().modify(|_, w| {
+                    // Same hazard as esp32 above: the status bit shares this
+                    // register, so preserve it rather than writing back a read
+                    // that may predate the completion.
+                    w.trans_done().set_bit();
                     for interrupt in interrupts {
                         match interrupt {
                             SpiInterrupt::TransferDone => w.int_trans_done_en().bit(enable),
