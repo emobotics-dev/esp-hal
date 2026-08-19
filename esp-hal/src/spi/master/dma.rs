@@ -1,9 +1,9 @@
 use core::{
-    cell::{Cell, UnsafeCell},
+    cell::UnsafeCell,
     cmp::min,
     mem::{ManuallyDrop, MaybeUninit},
     ptr::NonNull,
-    sync::atomic::{Ordering, fence},
+    sync::atomic::{AtomicBool, Ordering, fence},
 };
 
 #[cfg(feature = "unstable")]
@@ -158,8 +158,12 @@ impl<'d> SpiDma<'d, Blocking> {
 
         let state = spi.spi.dma_state();
 
-        state.tx_transfer_in_progress.set(false);
-        state.rx_transfer_in_progress.set(false);
+        state
+            .tx_transfer_in_progress
+            .store(false, Ordering::Relaxed);
+        state
+            .rx_transfer_in_progress
+            .store(false, Ordering::Relaxed);
 
         static mut TX_DESCRIPTORS: [[DmaDescriptor; 1]; SPI_NUM] =
             [[DmaDescriptor::EMPTY]; SPI_NUM];
@@ -246,26 +250,27 @@ impl<'d> SpiDma<'d, Async> {
     }
 
     async fn wait_for_idle_async(&mut self) {
-        if self.dma_driver().state.rx_transfer_in_progress.get() {
+        if self
+            .dma_driver()
+            .state
+            .rx_transfer_in_progress
+            .load(Ordering::Relaxed)
+        {
             let rx_result = DmaRxFuture::new(&mut self.channel.rx).await;
             if rx_result.is_err() {
-                // esp-hal #491 / docs/spi-dma-and-wakeup.md §7: the RX DMA
-                // descriptor faulted (inlink_dscr_error) — confirmed via
-                // dma_int_raw on fire27 under concurrent BLE+I²C bus traffic.
-                // The SPI never raises TransferDone and its `usr` (busy) bit
-                // stays stuck, so any later wait spins FOREVER (silent :format
-                // wedge: no panic, no timeout). Recover the peripheral so the
-                // next op isn't blocked: reset the DMA (clears the in/out/AHBM
-                // FIFOs holding the SPI data path), then cancel/abort the SPI
-                // (datalen=1 + update) so `usr` clears. The caller then sees
-                // bad/short data (CRC mismatch) → a recoverable error that
-                // sdspi retries at the command level, instead of a hang.
+                // RX descriptor fault: `usr` stays stuck and no TransferDone
+                // ever arrives, so recover the peripheral rather than wait
+                // forever. Bad/short data becomes a CRC error sdspi retries.
+                // esp-hal #491 / docs/spi-dma-and-wakeup.md §7.
                 self.dma_driver().reset_dma();
                 self.cancel_transfer();
                 fence(Ordering::Acquire);
                 return;
             }
-            self.dma_driver().state.rx_transfer_in_progress.set(false);
+            self.dma_driver()
+                .state
+                .rx_transfer_in_progress
+                .store(false, Ordering::Relaxed);
         }
 
         struct Fut {
@@ -278,14 +283,9 @@ impl<'d> SpiDma<'d, Async> {
         impl Fut {
             const DONE_EVENTS: EnumSet<SpiInterrupt> =
                 enumset::enum_set!(SpiInterrupt::TransferDone);
-            // After TransferDone the `usr` (busy) bit normally clears within a
-            // handful of polls. Bound the re-poll so a STUCK `usr` (PDMA
-            // usr-stuck fault, esp-hal #491) can't busy-re-wake forever: an
-            // unbounded `wake_by_ref` self-wake pins the interrupt-executor and
-            // masks the embassy time-driver IRQ, so `with_timeout` never fires
-            // and the whole core wedges (silent :format hang). The budget is
-            // >>> normal settling, so it never false-trips; on exhausting it we
-            // give up and the caller resets+cancels the wedged peripheral.
+            // Bound the post-DONE `usr` re-poll: unbounded self-waking pins
+            // the interrupt executor and masks the timer, so `with_timeout`
+            // never fires and the core wedges silently (esp-hal #491).
             #[cfg(any(esp32, esp32s2))]
             const BUSY_POLL_BUDGET: u32 = 50_000;
         }
@@ -318,9 +318,7 @@ impl<'d> SpiDma<'d, Async> {
                 // Upstream #6107: on esp32/s2 enable and status share a
                 // register, so the RMW above can erase a completion that
                 // landed between the read and the write. Re-check.
-                if !this.driver.interrupts().is_disjoint(Self::DONE_EVENTS)
-                    || !this.driver.busy()
-                {
+                if !this.driver.interrupts().is_disjoint(Self::DONE_EVENTS) || !this.driver.busy() {
                     #[cfg(any(esp32, esp32s2))]
                     if this.driver.busy() {
                         this.busy_polls = this.busy_polls.saturating_add(1);
@@ -363,23 +361,24 @@ impl<'d> SpiDma<'d, Async> {
             return;
         }
 
-        if self.dma_driver().state.tx_transfer_in_progress.get() {
+        if self
+            .dma_driver()
+            .state
+            .tx_transfer_in_progress
+            .load(Ordering::Relaxed)
+        {
             // In case DMA TX buffer is bigger than what the SPI consumes, stop the DMA.
             if !self.channel.tx.is_done() {
                 self.channel.tx.stop_transfer();
             }
-            self.dma_driver().state.tx_transfer_in_progress.set(false);
+            self.dma_driver()
+                .state
+                .tx_transfer_in_progress
+                .store(false, Ordering::Relaxed);
         }
 
-        // The caller reads the DMA-written RX buffer straight after this
-        // returns, so the completion check must be ordered before those loads.
-        // The blocking `wait_for_idle` has always ended with this fence; the
-        // async path — the one the SD driver actually uses — did not, leaving
-        // the buffer reads free to be hoisted above the done-check. Whether
-        // that actually happens is an inlining decision, which is exactly why
-        // the resulting fault moved under semantically inert edits: a stale
-        // busy-token byte makes the driver wait out every internal bound and
-        // report a >20 s "stall" on a card that was never slow.
+        // The caller reads the DMA-written buffer next; this orders those
+        // loads after the done-check, as every other completion path does.
         fence(Ordering::Acquire);
     }
 }
@@ -430,18 +429,20 @@ where
         }
     }
 
-    /// Spin budget for `cancel_and_quiesce`. An aborted transfer only has to
-    /// drain the burst already in flight (bytes, not a block), so a few
-    /// thousand polls would do; the budget is deliberately far above that so
-    /// it never truncates a legitimate wind-down, and exists solely to bound
-    /// the `usr`-stuck fault rather than to time anything.
+    /// Spin budget for `cancel_and_quiesce`: far above a burst wind-down, so
+    /// it only ever bounds the `usr`-stuck fault.
     const CANCEL_QUIESCE_POLLS: u32 = 50_000;
 
     fn is_done(&self) -> bool {
         if self.driver().busy() {
             return false;
         }
-        if self.dma_driver().state.rx_transfer_in_progress.get() {
+        if self
+            .dma_driver()
+            .state
+            .rx_transfer_in_progress
+            .load(Ordering::Relaxed)
+        {
             // If this is an asymmetric transfer and the RX side is smaller, the RX channel
             // will never be "done" as it won't have enough descriptors/buffer to receive
             // the EOF bit from the SPI. So instead the RX channel will hit
@@ -460,8 +461,14 @@ where
         while !self.is_done() {
             // Wait for the SPI to become idle
         }
-        self.dma_driver().state.rx_transfer_in_progress.set(false);
-        self.dma_driver().state.tx_transfer_in_progress.set(false);
+        self.dma_driver()
+            .state
+            .rx_transfer_in_progress
+            .store(false, Ordering::Relaxed);
+        self.dma_driver()
+            .state
+            .tx_transfer_in_progress
+            .store(false, Ordering::Relaxed);
         fence(Ordering::Acquire);
     }
 
@@ -485,11 +492,11 @@ where
         self.dma_driver()
             .state
             .rx_transfer_in_progress
-            .set(bytes_to_read > 0);
+            .store(bytes_to_read > 0, Ordering::Relaxed);
         self.dma_driver()
             .state
             .tx_transfer_in_progress
-            .set(bytes_to_write > 0);
+            .store(bytes_to_write > 0, Ordering::Relaxed);
         unsafe {
             self.dma_driver().start_transfer_dma(
                 full_duplex,
@@ -545,40 +552,33 @@ where
 
     fn cancel_transfer(&mut self) {
         let state = self.dma_driver().state;
-        if state.tx_transfer_in_progress.get() || state.rx_transfer_in_progress.get() {
+        if state.tx_transfer_in_progress.load(Ordering::Relaxed)
+            || state.rx_transfer_in_progress.load(Ordering::Relaxed)
+        {
             self.dma_driver().abort_transfer();
 
             // We need to stop the DMA transfer, too.
-            if state.tx_transfer_in_progress.get() {
+            if state.tx_transfer_in_progress.load(Ordering::Relaxed) {
                 self.channel.tx.stop_transfer();
-                state.tx_transfer_in_progress.set(false);
+                state
+                    .tx_transfer_in_progress
+                    .store(false, Ordering::Relaxed);
             }
-            if state.rx_transfer_in_progress.get() {
+            if state.rx_transfer_in_progress.load(Ordering::Relaxed) {
                 self.channel.rx.stop_transfer();
-                state.rx_transfer_in_progress.set(false);
+                state
+                    .rx_transfer_in_progress
+                    .store(false, Ordering::Relaxed);
             }
         }
     }
 
-    /// Cancel a transfer and wait until the hardware has actually stopped.
+    /// Cancel a transfer and wait until the engine has actually stopped.
     ///
-    /// Requesting a stop is not the same as having stopped. `cancel_transfer`
-    /// only *asks* the peripheral to abort (`abort_transfer` truncates the
-    /// datalen, `stop_transfer` sets `outlink_stop`) and then clears the
-    /// in-progress flags immediately — while `is_done` itself concedes the
-    /// peripheral may still be busy, since it checks `busy()` first. Returning
-    /// at that point hands the caller's buffer back while the DMA engine can
-    /// still complete an in-flight burst into it: the async-cancellation data
-    /// race (embassy #1045). The blocking `SpiDmaTransfer::drop` already does
-    /// cancel-then-`wait_for_idle`; the async paths, which are cancelled far
-    /// more often (every `with_timeout` that fires), must do the same.
-    ///
-    /// A destructor cannot be async, so the wait is a spin — but a *bounded*
-    /// one: the esp32 PDMA `usr`-stuck fault (#491, see `wait_for_idle_async`)
-    /// can leave `busy()` set indefinitely, and spinning forever inside a drop
-    /// glue would wedge the core. On exhausting the budget we hard-reset the
-    /// DMA, which stops the engine unconditionally. Either way we do not
-    /// return while the engine may still touch the buffer.
+    /// `cancel_transfer` only requests the stop, so returning before the
+    /// engine halts would hand the buffer back while DMA may still write it.
+    /// The wait is bounded: a `usr`-stuck fault must not spin in drop glue,
+    /// and on exhaustion the DMA is reset instead.
     fn cancel_and_quiesce(&mut self) {
         self.cancel_transfer();
 
@@ -591,8 +591,14 @@ where
             }
         }
 
-        self.dma_driver().state.rx_transfer_in_progress.set(false);
-        self.dma_driver().state.tx_transfer_in_progress.set(false);
+        self.dma_driver()
+            .state
+            .rx_transfer_in_progress
+            .store(false, Ordering::Relaxed);
+        self.dma_driver()
+            .state
+            .tx_transfer_in_progress
+            .store(false, Ordering::Relaxed);
         fence(Ordering::Acquire);
     }
 }
@@ -1061,8 +1067,10 @@ impl<'d> SpiDmaBus<'d, Async> {
     /// Transmit the given buffer to the bus.
     ///
     /// Tries a zero-copy DMA path when the slice lives in DRAM and (on ESP32)
-    /// is 4-byte aligned in address and length. Otherwise copies through
-    /// `tx_buf` — the same fallback upstream #5290 uses for ESP32 PDMA.
+    /// is 4-byte aligned in address and length: descriptors are built on the
+    /// stack, pointing at the caller's buffer. Otherwise copies through
+    /// `tx_buf` — the same fallback upstream #5290 uses for ESP32 PDMA, which
+    /// wedges on a descriptor length that is not a 4-byte multiple.
     #[instability::unstable]
     pub async fn write_async(&mut self, words: &[u8]) -> Result<(), Error> {
         if words.is_empty() {
@@ -1074,15 +1082,9 @@ impl<'d> SpiDmaBus<'d, Async> {
 
         let empty_rx_buffer = unsafe { self.spi_dma.dma_driver().empty_rx_buffer() };
 
-        // Stack descriptor count: enough to chain MAX_DMA_SIZE bytes at the
-        // worst-case 4-byte alignment (chunk = 4096 - 4 = 4092). +2 for slop.
         const ZC_DESC_COUNT: usize = MAX_DMA_SIZE.div_ceil(4092) + 2;
 
-        // Zero-copy path: caller's buffer is in DRAM. On ESP32 PDMA, a
-        // descriptor length that is not a 4-byte multiple wedges TransferDone
-        // — same rule as upstream #5290, so copy through `tx_buf` instead of
-        // rounding the descriptor length (that reads past the slice) or a
-        // pad-descriptor chain.
+        // Upstream #5290: ESP32 PDMA TX needs 4-byte address and length.
         let zero_copy = is_slice_in_dram(words) && {
             #[cfg(esp32)]
             {
@@ -1093,47 +1095,36 @@ impl<'d> SpiDmaBus<'d, Async> {
                 true
             }
         };
+
         if zero_copy {
             let mut offset = 0;
             while offset < words.len() {
                 let remaining = &words[offset..];
                 let mut descriptors = [DmaDescriptor::EMPTY; ZC_DESC_COUNT];
-                match unsafe {
-                    prepare_for_tx(
-                        &mut descriptors,
-                        NonNull::from(remaining),
-                        1,
-                    )
-                } {
+                let prep = unsafe { prepare_for_tx(&mut descriptors, NonNull::from(remaining), 1) };
+
+                match prep {
                     Ok((mut tx_buf, transferred)) => {
-                        let mut spi = DropGuard::new(
-                            &mut self.spi_dma,
-                            |spi| spi.cancel_and_quiesce(),
-                        );
+                        let mut spi =
+                            DropGuard::new(&mut self.spi_dma, |spi| spi.cancel_and_quiesce());
                         unsafe {
-                            spi.start_dma_transfer(
-                                0,
-                                transferred,
-                                empty_rx_buffer,
-                                &mut tx_buf,
-                            )?;
+                            spi.start_dma_transfer(0, transferred, empty_rx_buffer, &mut tx_buf)?;
                         }
                         spi.wait_for_idle_async().await;
                         spi.defuse();
                         offset += transferred;
                     }
-                    Err(_) => break, // alignment mismatch — fall back below
+                    Err(_) => break,
                 }
             }
             if offset == words.len() {
                 return Ok(());
             }
-            // Partial zero-copy + copy fallback for the remainder.
-            let words = &words[offset..];
-            return self.write_async_copy(words, empty_rx_buffer).await;
+            return self
+                .write_async_copy(&words[offset..], empty_rx_buffer)
+                .await;
         }
 
-        // Copy path (full).
         self.write_async_copy(words, empty_rx_buffer).await
     }
 
@@ -1696,8 +1687,16 @@ struct DmaInfo {
     dma_peripheral: crate::dma::DmaPeripheral,
 }
 struct DmaState {
-    tx_transfer_in_progress: Cell<bool>,
-    rx_transfer_in_progress: Cell<bool>,
+    // Atomics, not `Cell`. These are read by `is_done()` -- which gates every
+    // `wait_for_idle` -- and written by `start_transfer_dma` and the async
+    // completion path. `Cell` here is a data race: the ISR and the waiting task
+    // both reach this state, and on a bus shared between two drivers the arm
+    // and the wait can run on different cores. `Cell::get`/`set` are plain
+    // non-atomic accesses with no ordering, so the compiler may reorder or
+    // elide them -- and once the program has UB, observed behaviour becomes a
+    // property of what codegen chose rather than of the source.
+    tx_transfer_in_progress: AtomicBool,
+    rx_transfer_in_progress: AtomicBool,
 
     empty_rx_buffer: UnsafeCell<MaybeUninit<DmaRxBuf>>,
     empty_tx_buffer: UnsafeCell<MaybeUninit<DmaTxBuf>>,
@@ -1731,9 +1730,24 @@ impl DmaState {
     }
 }
 
-// SAFETY: State belongs to the currently constructed driver instance. As such, it'll not be
-// accessed concurrently in multiple threads.
+// SAFETY: the in-progress flags are atomic; the buffer cells are only reached
+// through the documented `unsafe fn` accessors above, whose callers must uphold
+// aliasing. The previous justification -- "belongs to the currently constructed
+// driver instance, so not accessed concurrently" -- does not hold: the ISR and
+// the waiting task both reach this, and a shared bus can be armed and awaited
+// from different cores.
 unsafe impl Sync for DmaState {}
+
+/// Regression guard for the in-progress flags, checked at compile time.
+///
+/// These are read by `is_done()` -- which gates every `wait_for_idle` -- while
+/// the arming path and the ISR write them. A revert to `Cell` compiles, is
+/// suppressed by the `unsafe impl Sync` above, and produces a stall whose
+/// visibility depends on binary layout. Nothing else would catch it.
+fn _dma_state_flags_stay_atomic(s: &DmaState) {
+    let _: &AtomicBool = &s.tx_transfer_in_progress;
+    let _: &AtomicBool = &s.rx_transfer_in_progress;
+}
 
 for_each_spi_master!(
     (all $( ($peri:ident, $sys:ident, $sclk:ident $_cs:tt $_sio:tt $(, $is_qspi:tt)?)),* ) => {
@@ -1748,8 +1762,8 @@ for_each_spi_master!(
                             };
 
                             static DMA_STATE: DmaState = DmaState {
-                                tx_transfer_in_progress: Cell::new(false),
-                                rx_transfer_in_progress: Cell::new(false),
+                                tx_transfer_in_progress: AtomicBool::new(false),
+                                rx_transfer_in_progress: AtomicBool::new(false),
 
                                 empty_rx_buffer: UnsafeCell::new(MaybeUninit::uninit()),
                                 empty_tx_buffer: UnsafeCell::new(MaybeUninit::uninit()),
