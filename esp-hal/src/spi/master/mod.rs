@@ -34,8 +34,6 @@
 //! [`embedded-hal-bus`]: https://docs.rs/embedded-hal-bus/latest/embedded_hal_bus/spi/index.html
 //! [`embassy-embedded-hal`]: embassy_embedded_hal::shared_bus
 
-#[cfg(esp32)]
-use core::cell::Cell;
 use core::{
     cell::UnsafeCell,
     future::Future,
@@ -44,6 +42,10 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
+// esp32 only: the MISO timing compensation in `Esp32Hack` is the sole atomic
+// state in this file, and it does not exist on other targets.
+#[cfg(esp32)]
+use core::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 
 #[cfg(spi_master_supports_dma)]
 mod dma;
@@ -1920,11 +1922,14 @@ impl Driver {
             Some(0)
         };
 
-        self.state.esp32_hack.extra_dummy.set(dummy_required as u8);
         self.state
             .esp32_hack
-            .timing_miso_delay
-            .set(timing_miso_delay);
+            .extra_dummy
+            .store(dummy_required as u8, Ordering::Relaxed);
+        self.state.esp32_hack.timing_miso_delay.store(
+            timing_miso_delay.map_or(MISO_DELAY_NONE, u16::from),
+            Ordering::Relaxed,
+        );
     }
 
     fn set_data_mode(&self, data_mode: Mode) {
@@ -2301,8 +2306,10 @@ impl Driver {
 
             if !is_write {
                 // Values are set up in apply_config
-                let timing_miso_delay = self.state.esp32_hack.timing_miso_delay.get();
-                let extra_dummy = self.state.esp32_hack.extra_dummy.get();
+                let raw = self.state.esp32_hack.timing_miso_delay.load(Ordering::Relaxed);
+                let timing_miso_delay =
+                    if raw == MISO_DELAY_NONE { None } else { Some(raw as u8) };
+                let extra_dummy = self.state.esp32_hack.extra_dummy.load(Ordering::Relaxed);
                 dummy += extra_dummy;
 
                 if let Some(delay) = timing_miso_delay {
@@ -2500,8 +2507,8 @@ for_each_spi_master! {
 
                     #[cfg(esp32)]
                     esp32_hack: Esp32Hack {
-                        timing_miso_delay: Cell::new(None),
-                        extra_dummy: Cell::new(0),
+                        timing_miso_delay: AtomicU16::new(MISO_DELAY_NONE),
+                        extra_dummy: AtomicU8::new(0),
                     },
                 };
 
@@ -2552,12 +2559,31 @@ impl State {
     }
 }
 
+/// esp32 MISO timing compensation, computed in `apply_config` and consumed by
+/// `setup_half_duplex`.
+///
+/// Atomics, not `Cell`. This lives in a `static State` that `unsafe impl Sync`
+/// hands out to every context that touches SPI -- the task, the other core, and
+/// the ISR -- so `Cell` here is a data race by construction, and the `Sync`
+/// assertion below was covering for it. `Cell::get`/`set` are plain
+/// non-atomic loads and stores with no ordering, so a config applied on one
+/// core while a transfer is being set up on another can be read torn or stale,
+/// and the compiler is free to reorder or elide them.
+///
+/// `timing_miso_delay: Option<u8>` becomes `u16`: 0x100 for `None`, otherwise
+/// the value. One atomic, no niche games, and the encode/decode is local.
 #[cfg(esp32)]
 struct Esp32Hack {
-    timing_miso_delay: Cell<Option<u8>>,
-    extra_dummy: Cell<u8>,
+    timing_miso_delay: AtomicU16,
+    extra_dummy: AtomicU8,
 }
 
+#[cfg(esp32)]
+const MISO_DELAY_NONE: u16 = 0x100;
+
+// SAFETY: every field is either atomic or an `UnsafeCell` whose access is
+// documented at its use site (`State::pins`). The esp32 timing fields used to
+// be `Cell`, which this assertion silently made unsound -- see `Esp32Hack`.
 unsafe impl Sync for State {}
 
 #[ram]
