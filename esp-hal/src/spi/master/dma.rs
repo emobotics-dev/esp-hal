@@ -38,26 +38,8 @@ use crate::dma::prepare_for_tx;
 
 const MAX_DMA_SIZE: usize = 32736;
 
-/// Async transfers cancelled mid-flight — non-zero means an SD op timed out.
-pub static CANCEL_QUIESCE_HITS: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(0);
-/// Worst spin seen waiting for a cancelled engine to stop.
-pub static CANCEL_QUIESCE_MAX_POLLS: portable_atomic::AtomicU32 =
-    portable_atomic::AtomicU32::new(0);
-/// Cancels where the engine never stopped and the DMA had to be reset.
-pub static CANCEL_QUIESCE_RESETS: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(0);
 
-/// Where `wait_for_idle_async` is: 1 = RX future, 2 = TransferDone, 0 = out.
-pub static SPI_WAIT_PHASE: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(0);
-/// Bumped on every [`SPI_WAIT_PHASE`] change; frozen means parked.
-pub static SPI_WAIT_SEQ: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(0);
-/// TransferDone polls. At phase 2: frozen = lost wakeup, rising = the
-/// transfer is polled but never completes.
-pub static FUT_POLLS: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(0);
 
-/// RX DMA descriptor faults recovered in `wait_for_idle_async` (esp-hal #491).
-pub static RX_DSCR_FAULTS: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(0);
-/// esp32 `usr`-stuck faults recovered after `TransferDone` (esp-hal #491).
-pub static USR_STUCK_RECOVERIES: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(0);
 
 impl<'d> Spi<'d, Blocking> {
     #[doc_replace(
@@ -421,12 +403,7 @@ impl<'d> SpiDma<'d, Async> {
     }
 
     async fn wait_for_idle_async(&mut self) {
-        fn wphase(p: u32) {
-            SPI_WAIT_PHASE.store(p, Ordering::Relaxed);
-            SPI_WAIT_SEQ.fetch_add(1, Ordering::Relaxed);
-        }
         if self.dma_driver().state.rx_transfer_in_progress.load(Ordering::Relaxed) {
-            wphase(1);
             let rx_result = DmaRxFuture::new(&mut self.channel.rx).await;
             if rx_result.is_err() {
                 // RX descriptor fault: `usr` stays stuck and no TransferDone
@@ -435,7 +412,6 @@ impl<'d> SpiDma<'d, Async> {
                 // esp-hal #491 / docs/spi-dma-and-wakeup.md §7.
                 self.dma_driver().reset_dma();
                 self.cancel_transfer();
-                RX_DSCR_FAULTS.fetch_add(1, Ordering::Relaxed);
                 fence(Ordering::Acquire);
                 return;
             }
@@ -463,7 +439,6 @@ impl<'d> SpiDma<'d, Async> {
 
             fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
                 let this = self.get_mut();
-                FUT_POLLS.fetch_add(1, Ordering::Relaxed);
                 if !this.driver.interrupts().is_disjoint(Self::DONE_EVENTS) {
                     #[cfg(any(esp32, esp32s2))]
                     // Need to poll for done-ness even after interrupt fires —
@@ -495,7 +470,6 @@ impl<'d> SpiDma<'d, Async> {
         }
 
         if !self.is_done() {
-            wphase(2);
             Fut {
                 driver: self.driver(),
                 #[cfg(any(esp32, esp32s2))]
@@ -513,7 +487,6 @@ impl<'d> SpiDma<'d, Async> {
         if self.driver().busy() {
             self.dma_driver().reset_dma();
             self.cancel_transfer();
-            USR_STUCK_RECOVERIES.fetch_add(1, Ordering::Relaxed);
             fence(Ordering::Acquire);
             return;
         }
@@ -526,7 +499,6 @@ impl<'d> SpiDma<'d, Async> {
             self.dma_driver().state.tx_transfer_in_progress.store(false, Ordering::Relaxed);
         }
 
-        wphase(0);
         // The caller reads the DMA-written buffer next; this orders those
         // loads after the done-check, as every other completion path does.
         fence(Ordering::Acquire);
@@ -714,18 +686,15 @@ where
     /// and on exhaustion the DMA is reset instead.
     fn cancel_and_quiesce(&mut self) {
         self.cancel_transfer();
-        CANCEL_QUIESCE_HITS.fetch_add(1, Ordering::Relaxed);
 
         let mut polls: u32 = 0;
         while !self.is_done() {
             polls += 1;
             if polls >= Self::CANCEL_QUIESCE_POLLS {
                 self.dma_driver().reset_dma();
-                CANCEL_QUIESCE_RESETS.fetch_add(1, Ordering::Relaxed);
                 break;
             }
         }
-        CANCEL_QUIESCE_MAX_POLLS.fetch_max(polls, Ordering::Relaxed);
 
         self.dma_driver().state.rx_transfer_in_progress.store(false, Ordering::Relaxed);
         self.dma_driver().state.tx_transfer_in_progress.store(false, Ordering::Relaxed);
