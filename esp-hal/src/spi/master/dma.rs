@@ -1,9 +1,9 @@
 use core::{
-    cell::{Cell, UnsafeCell},
+    cell::UnsafeCell,
     cmp::min,
     mem::{ManuallyDrop, MaybeUninit},
     ptr::NonNull,
-    sync::atomic::{Ordering, fence},
+    sync::atomic::{AtomicBool, Ordering, fence},
 };
 
 #[cfg(feature = "unstable")]
@@ -184,8 +184,8 @@ impl<'d> SpiDma<'d, Blocking> {
 
         let state = spi.spi.dma_state();
 
-        state.tx_transfer_in_progress.set(false);
-        state.rx_transfer_in_progress.set(false);
+        state.tx_transfer_in_progress.store(false, Ordering::Relaxed);
+        state.rx_transfer_in_progress.store(false, Ordering::Relaxed);
 
         static mut TX_DESCRIPTORS: [[DmaDescriptor; 1]; SPI_NUM] =
             [[DmaDescriptor::EMPTY]; SPI_NUM];
@@ -372,8 +372,8 @@ impl<'d> SpiDma<'d, Blocking> {
         if !self.is_done() {
             return false;
         }
-        self.dma_driver().state.rx_transfer_in_progress.set(false);
-        self.dma_driver().state.tx_transfer_in_progress.set(false);
+        self.dma_driver().state.rx_transfer_in_progress.store(false, Ordering::Relaxed);
+        self.dma_driver().state.tx_transfer_in_progress.store(false, Ordering::Relaxed);
         fence(Ordering::Acquire);
         true
     }
@@ -425,7 +425,7 @@ impl<'d> SpiDma<'d, Async> {
             SPI_WAIT_PHASE.store(p, Ordering::Relaxed);
             SPI_WAIT_SEQ.fetch_add(1, Ordering::Relaxed);
         }
-        if self.dma_driver().state.rx_transfer_in_progress.get() {
+        if self.dma_driver().state.rx_transfer_in_progress.load(Ordering::Relaxed) {
             wphase(1);
             let rx_result = DmaRxFuture::new(&mut self.channel.rx).await;
             if rx_result.is_err() {
@@ -439,7 +439,7 @@ impl<'d> SpiDma<'d, Async> {
                 fence(Ordering::Acquire);
                 return;
             }
-            self.dma_driver().state.rx_transfer_in_progress.set(false);
+            self.dma_driver().state.rx_transfer_in_progress.store(false, Ordering::Relaxed);
         }
 
         struct Fut {
@@ -518,12 +518,12 @@ impl<'d> SpiDma<'d, Async> {
             return;
         }
 
-        if self.dma_driver().state.tx_transfer_in_progress.get() {
+        if self.dma_driver().state.tx_transfer_in_progress.load(Ordering::Relaxed) {
             // In case DMA TX buffer is bigger than what the SPI consumes, stop the DMA.
             if !self.channel.tx.is_done() {
                 self.channel.tx.stop_transfer();
             }
-            self.dma_driver().state.tx_transfer_in_progress.set(false);
+            self.dma_driver().state.tx_transfer_in_progress.store(false, Ordering::Relaxed);
         }
 
         wphase(0);
@@ -587,7 +587,7 @@ where
         if self.driver().busy() {
             return false;
         }
-        if self.dma_driver().state.rx_transfer_in_progress.get() {
+        if self.dma_driver().state.rx_transfer_in_progress.load(Ordering::Relaxed) {
             // If this is an asymmetric transfer and the RX side is smaller, the RX channel
             // will never be "done" as it won't have enough descriptors/buffer to receive
             // the EOF bit from the SPI. So instead the RX channel will hit
@@ -606,8 +606,8 @@ where
         while !self.is_done() {
             // Wait for the SPI to become idle
         }
-        self.dma_driver().state.rx_transfer_in_progress.set(false);
-        self.dma_driver().state.tx_transfer_in_progress.set(false);
+        self.dma_driver().state.rx_transfer_in_progress.store(false, Ordering::Relaxed);
+        self.dma_driver().state.tx_transfer_in_progress.store(false, Ordering::Relaxed);
         fence(Ordering::Acquire);
     }
 
@@ -631,11 +631,11 @@ where
         self.dma_driver()
             .state
             .rx_transfer_in_progress
-            .set(bytes_to_read > 0);
+            .store(bytes_to_read > 0, Ordering::Relaxed);
         self.dma_driver()
             .state
             .tx_transfer_in_progress
-            .set(bytes_to_write > 0);
+            .store(bytes_to_write > 0, Ordering::Relaxed);
         unsafe {
             self.dma_driver().start_transfer_dma(
                 full_duplex,
@@ -691,17 +691,17 @@ where
 
     fn cancel_transfer(&mut self) {
         let state = self.dma_driver().state;
-        if state.tx_transfer_in_progress.get() || state.rx_transfer_in_progress.get() {
+        if state.tx_transfer_in_progress.load(Ordering::Relaxed) || state.rx_transfer_in_progress.load(Ordering::Relaxed) {
             self.dma_driver().abort_transfer();
 
             // We need to stop the DMA transfer, too.
-            if state.tx_transfer_in_progress.get() {
+            if state.tx_transfer_in_progress.load(Ordering::Relaxed) {
                 self.channel.tx.stop_transfer();
-                state.tx_transfer_in_progress.set(false);
+                state.tx_transfer_in_progress.store(false, Ordering::Relaxed);
             }
-            if state.rx_transfer_in_progress.get() {
+            if state.rx_transfer_in_progress.load(Ordering::Relaxed) {
                 self.channel.rx.stop_transfer();
-                state.rx_transfer_in_progress.set(false);
+                state.rx_transfer_in_progress.store(false, Ordering::Relaxed);
             }
         }
     }
@@ -727,8 +727,8 @@ where
         }
         CANCEL_QUIESCE_MAX_POLLS.fetch_max(polls, Ordering::Relaxed);
 
-        self.dma_driver().state.rx_transfer_in_progress.set(false);
-        self.dma_driver().state.tx_transfer_in_progress.set(false);
+        self.dma_driver().state.rx_transfer_in_progress.store(false, Ordering::Relaxed);
+        self.dma_driver().state.tx_transfer_in_progress.store(false, Ordering::Relaxed);
         fence(Ordering::Acquire);
     }
 }
@@ -1850,8 +1850,16 @@ struct DmaInfo {
     dma_peripheral: crate::dma::DmaPeripheral,
 }
 struct DmaState {
-    tx_transfer_in_progress: Cell<bool>,
-    rx_transfer_in_progress: Cell<bool>,
+    // Atomics, not `Cell`. These are read by `is_done()` -- which gates every
+    // `wait_for_idle` -- and written by `start_transfer_dma` and the async
+    // completion path. `Cell` here is a data race: the ISR and the waiting task
+    // both reach this state, and on a bus shared between two drivers the arm
+    // and the wait can run on different cores. `Cell::get`/`set` are plain
+    // non-atomic accesses with no ordering, so the compiler may reorder or
+    // elide them -- and once the program has UB, observed behaviour becomes a
+    // property of what codegen chose rather than of the source.
+    tx_transfer_in_progress: AtomicBool,
+    rx_transfer_in_progress: AtomicBool,
 
     empty_rx_buffer: UnsafeCell<MaybeUninit<DmaRxBuf>>,
     empty_tx_buffer: UnsafeCell<MaybeUninit<DmaTxBuf>>,
@@ -1885,8 +1893,12 @@ impl DmaState {
     }
 }
 
-// SAFETY: State belongs to the currently constructed driver instance. As such, it'll not be
-// accessed concurrently in multiple threads.
+// SAFETY: the in-progress flags are atomic; the buffer cells are only reached
+// through the documented `unsafe fn` accessors above, whose callers must uphold
+// aliasing. The previous justification -- "belongs to the currently constructed
+// driver instance, so not accessed concurrently" -- does not hold: the ISR and
+// the waiting task both reach this, and a shared bus can be armed and awaited
+// from different cores.
 unsafe impl Sync for DmaState {}
 
 for_each_spi_master!(
@@ -1902,8 +1914,8 @@ for_each_spi_master!(
                             };
 
                             static DMA_STATE: DmaState = DmaState {
-                                tx_transfer_in_progress: Cell::new(false),
-                                rx_transfer_in_progress: Cell::new(false),
+                                tx_transfer_in_progress: AtomicBool::new(false),
+                                rx_transfer_in_progress: AtomicBool::new(false),
 
                                 empty_rx_buffer: UnsafeCell::new(MaybeUninit::uninit()),
                                 empty_tx_buffer: UnsafeCell::new(MaybeUninit::uninit()),
