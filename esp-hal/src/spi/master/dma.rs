@@ -1870,6 +1870,17 @@ impl DmaState {
 // from different cores.
 unsafe impl Sync for DmaState {}
 
+/// Regression guard for the in-progress flags, checked at compile time.
+///
+/// These are read by `is_done()` -- which gates every `wait_for_idle` -- while
+/// the arming path and the ISR write them. A revert to `Cell` compiles, is
+/// suppressed by the `unsafe impl Sync` above, and produces a stall whose
+/// visibility depends on binary layout. Nothing else would catch it.
+fn _dma_state_flags_stay_atomic(s: &DmaState) {
+    let _: &AtomicBool = &s.tx_transfer_in_progress;
+    let _: &AtomicBool = &s.rx_transfer_in_progress;
+}
+
 for_each_spi_master!(
     (all $( ($peri:ident, $sys:ident, $sclk:ident $_cs:tt $_sio:tt $(, $is_qspi:tt)?)),* ) => {
         impl AnySpi<'_> {

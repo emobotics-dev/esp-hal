@@ -2609,6 +2609,19 @@ const MISO_DELAY_NONE: u16 = 0x100;
 // be `Cell`, which this assertion silently made unsound -- see `Esp32Hack`.
 unsafe impl Sync for State {}
 
+/// Regression guard for the `Esp32Hack` fields, checked at compile time.
+///
+/// A revert to `Cell` here is otherwise **silent**: it is valid Rust, the
+/// `unsafe impl Sync` above suppresses the only error, `#[cfg(esp32)]` keeps it
+/// out of every host and Miri build, and the SD stall it causes appears or
+/// disappears with binary layout -- so a green HIL run proves nothing either.
+/// This turns that regression into a build error.
+#[cfg(esp32)]
+fn _esp32_hack_fields_stay_atomic(h: &Esp32Hack) {
+    let _: &AtomicU16 = &h.timing_miso_delay;
+    let _: &AtomicU8 = &h.extra_dummy;
+}
+
 #[ram]
 fn handle_async(info: &'static Info, state: &'static State) {
     let driver = Driver { info, state };
