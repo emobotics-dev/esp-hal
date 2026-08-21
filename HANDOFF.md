@@ -2,7 +2,9 @@
 
 For the HIL agent. This is the emobotics **esp-hal 1.1.1 fork**, not upstream main.
 
-Rebuilt from `esp-hal-v1.1.1`. Follow-ups squashed into the originating commit. Where we dropped fork-local work that main already fixed, the replacement commit uses that PR’s author/subject (1.1.1 paths — main’s patches do not apply as-is).
+> **Note:** the prose below was written **before** the rebase and still says 1.1.1 in places. The tree is on **upstream 1.1.2** (`esp-hal/Cargo.toml` = `1.1.2`, a real crates.io release); consumers must pin `=1.1.2`.
+
+Rebuilt from `esp-hal-v1.1.1`, then rebased onto `esp-hal-v1.1.2`. Follow-ups squashed into the originating commit. Where we dropped fork-local work that main already fixed, the replacement commit uses that PR’s author/subject (1.1.1 paths — main’s patches do not apply as-is).
 
 | | |
 |---|---|
@@ -11,7 +13,9 @@ Rebuilt from `esp-hal-v1.1.1`. Follow-ups squashed into the originating commit. 
 | Worktree | `/home/holger-local/worktrees/analyse-changes/local-new` |
 | Host check | `esp32c3` + `esp32` `cargo check` were green on this tree. **No HIL yet.** |
 
-Do **not** re-add dropped APIs or the ROM-stack reclaim to “make fire27 link.” If fire27 cannot place `LVGL_BUFS`, that is an **application** layout problem.
+Do **not** re-add dropped APIs to “make fire27 link.”
+
+> **Superseded (`local-1.1.2`):** this file also said not to re-add the **ROM-stack reclaim**, and that a fire27 link failure is “an application layout problem.” That was wrong, and the reclaim is back — see “ROM-stack reclaim” below.
 
 ---
 
@@ -36,7 +40,17 @@ Logger, `.bss.radio` (esp32-only), stack **min** (not #6139’s all-chip default
 
 ### Dropped from history (do not restore)
 
-Pad-chain, ROM-stack reclaim, I2C NACK skip/rate-limit, `prepare_for_tx` import gate, `descriptor_address`, `arm_half_duplex_*` / `take_transfer`, debug counters, `MAIN_STACK_MAX_SIZE`, mega-align commit.
+Pad-chain, I2C NACK skip/rate-limit, `prepare_for_tx` import gate, `descriptor_address`, `arm_half_duplex_*` / `take_transfer`, debug counters, `MAIN_STACK_MAX_SIZE`, mega-align commit.
+
+### ROM-stack reclaim — dropped, then RESTORED (`local-1.1.2`)
+
+`reserved_rom_stack_app` is reclaimed into `dram2_seg` again: origin `0x3FFE_5230`, len **110 032**.
+
+Dropping it was a mistake. `dram2_seg` backs `.dram2_uninit`, which is the section esp-hal's own `#[ram(reclaimed)]` attribute emits into — so removing the reclaim un-claims memory the attribute exists to hand out, from inside esp-hal, with no app-visible cause. fire27's `.dram2_uninit` residents (56 KiB heap + 30 720 B double LVGL render buffers + 2×8 KiB SD block-DMA buffers = 104 448 B) then overflow the 98 768 B segment by 5 680 B and the link fails.
+
+It is not an application layout problem: the 56 KiB heap is a HIL-confirmed floor (below it LVGL OOMs mid-render, `LV_ASSERT_MALLOC` stalls the PRO thread, RWDT fires) and trimming the render buffers costs FPS against the per-target `perf_test` floors.
+
+`reserved_rom_stack_pro` stays reserved — the PRO core may still touch it on early-boot paths. The APP-core ROM stack is dead once the app-core entry point hands control to `start_app_core`.
 
 ---
 
@@ -83,7 +97,7 @@ Unchanged: `INT_ENA_LOCK`, ISR clears **observed** bits, read future `data_avail
 
 ### 4. ESP32 memory map / linker
 
-Both ROM stacks reserved. `dram2_seg` origin `0x3FFE_7E30`, len **98 768** (−11 KiB vs `local-1.1.1`). `.bss` ALIGN 4. `.bss.radio` only `#IF esp32`. Stack **min** only.
+~~Both ROM stacks reserved. `dram2_seg` origin `0x3FFE_7E30`, len **98 768** (−11 KiB vs `local-1.1.1`).~~ **Reverted on `local-1.1.2`**: PRO ROM stack reserved, APP reclaimed, `dram2_seg` origin `0x3FFE_5230`, len **110 032** — i.e. back to `local-1.1.1`'s geometry, so this item is no longer a behaviour change to re-HIL. `.bss` ALIGN 4. `.bss.radio` only `#IF esp32`. Stack **min** only.
 
 **HIL / link (fire27 first):** `LVGL_BUFS` + BLE heap may overflow `dram2`. **Do not reclaim ROM stack.** Move buffers in the app. BLE must still come up; blob symbols must stay put when user `.bss` grows.
 
@@ -127,7 +141,7 @@ Classify failures:
 ## Do not re-introduce
 
 - `arm_half_duplex_*` / `take_transfer` / `descriptor_address`.
-- Reclaiming `reserved_rom_stack_app`.
+- Reclaiming `reserved_rom_stack_pro` (the APP one IS reclaimed — see above).
 - `prepare_for_tx` rounding `length` up without a pad buffer.
 - I2C NACK skip / rate-limit “to protect the radio”.
 - `enable_listen` writing `trans_done = 1` **and** the #6107 re-check stacked.
