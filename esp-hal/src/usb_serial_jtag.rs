@@ -704,10 +704,6 @@ where
 static WAKER_TX: AtomicWaker = AtomicWaker::new();
 
 static WAKER_RX: AtomicWaker = AtomicWaker::new();
-// TX and RX interrupts are enabled independently. Once either is enabled, its
-// handler can preempt the other side's INT_ENA read-modify-write and cause
-// stale enable bits to be restored. Serialize all INT_ENA updates.
-static INT_ENA_LOCK: RawMutex = RawMutex::new();
 
 /// Serialises every read-modify-write of `int_ena`.
 ///
@@ -720,7 +716,7 @@ static INT_ENA_LOCK: RawMutex = RawMutex::new();
 ///
 /// `RawMutex` disables interrupts, which is the guarantee required.
 /// `esp_hal::timer::timg` and `systimer` guard their own `int_ena` the same way.
-static INT_ENA_LOCK: esp_sync::RawMutex = esp_sync::RawMutex::new();
+static INT_ENA_LOCK: RawMutex = RawMutex::new();
 
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 struct UsbSerialJtagWriteFuture<'d> {
