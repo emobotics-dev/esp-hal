@@ -3756,7 +3756,7 @@ macro_rules! for_each_peripheral {
         disable_peri_interrupt }))); _for_each_inner_peripheral!((@ peri_type #[doc =
         "UHCI0 peripheral singleton"] UHCI0 <= UHCI0() (unstable)));
         _for_each_inner_peripheral!((@ peri_type #[doc = "USB0 peripheral singleton"]
-        USB0 <= USB0() (unstable))); _for_each_inner_peripheral!((@ peri_type #[doc =
+        USB0 <= USB_FS() (unstable))); _for_each_inner_peripheral!((@ peri_type #[doc =
         "USB_DEVICE peripheral singleton"] USB_DEVICE <= USB_DEVICE(USB_DEVICE : {
         bind_peri_interrupt, enable_peri_interrupt, disable_peri_interrupt })
         (unstable))); _for_each_inner_peripheral!((@ peri_type #[doc =
@@ -4127,7 +4127,7 @@ macro_rules! for_each_peripheral {
         UART2 <= UART2(UART2 : { bind_peri_interrupt, enable_peri_interrupt,
         disable_peri_interrupt })), (@ peri_type #[doc = "UHCI0 peripheral singleton"]
         UHCI0 <= UHCI0() (unstable)), (@ peri_type #[doc = "USB0 peripheral singleton"]
-        USB0 <= USB0() (unstable)), (@ peri_type #[doc =
+        USB0 <= USB_FS() (unstable)), (@ peri_type #[doc =
         "USB_DEVICE peripheral singleton"] USB_DEVICE <= USB_DEVICE(USB_DEVICE : {
         bind_peri_interrupt, enable_peri_interrupt, disable_peri_interrupt })
         (unstable)), (@ peri_type #[doc = "USB_WRAP peripheral singleton"] USB_WRAP <=

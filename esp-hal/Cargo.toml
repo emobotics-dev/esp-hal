@@ -110,7 +110,10 @@ esp32c6 = { version = "0.23", features = ["critical-section", "rt"], optional = 
 esp32c61 = { version = "0.3", features = ["critical-section", "rt"], optional = true }
 esp32h2 = { version = "0.19", features = ["critical-section", "rt"], optional = true }
 esp32s2 = { version = "0.31", features = ["critical-section", "rt"], optional = true }
-esp32s3 = { version = "0.35", features = ["critical-section", "rt"], optional = true }
+# 0.35.3 or newer: that release renamed the USB0 peripheral to USB_FS and
+# de-prefixed the RTC_CNTL EXT_WAKEUP1 accessors, and this crate now uses the
+# new names. Renames only — same addresses, same register layout.
+esp32s3 = { version = "0.35.3", features = ["critical-section", "rt"], optional = true }
 
 [target.'cfg(target_arch = "riscv32")'.dependencies]
 riscv            = { version = "0.15.0" }

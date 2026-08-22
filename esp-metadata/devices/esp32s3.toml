@@ -93,7 +93,11 @@ peripherals = [
     { name = "UART1", interrupts = { peri = "UART1" }, stable = true, clock_group = "UART" },
     { name = "UART2", interrupts = { peri = "UART2" }, stable = true, clock_group = "UART" },
     { name = "UHCI0", dma_peripheral = 2 },
-    { name = "USB0" },
+    # PAC 0.35.3 renamed this peripheral USB0 -> USB_FS (same address
+    # 0x6008_0000, byte-identical register block). esp-hal's singleton keeps the
+    # name USB0, so `peripherals::USB0` and otg_fs are unaffected; only the PAC
+    # symbol it maps to changes.
+    { name = "USB0", pac = "USB_FS" },
     { name = "USB_DEVICE", interrupts = { peri = "USB_DEVICE" } },
     { name = "USB_WRAP" },
     { name = "WCL" },

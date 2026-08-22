@@ -200,11 +200,11 @@ impl WakeSource for Ext1WakeupSource<'_, '_> {
             // clear previous wakeup status
             rtc_cntl
                 .ext_wakeup1()
-                .modify(|_, w| w.ext_wakeup1_status_clr().set_bit());
+                .modify(|_, w| w.status_clr().set_bit());
             // set pin register field
             rtc_cntl
                 .ext_wakeup1()
-                .modify(|_, w| w.ext_wakeup1_sel().bits(bits));
+                .modify(|_, w| w.sel().bits(bits));
             // set level register field
             rtc_cntl
                 .ext_wakeup_conf()
