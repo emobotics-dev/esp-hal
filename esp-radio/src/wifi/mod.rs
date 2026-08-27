@@ -91,6 +91,24 @@ use crate::{
     },
     wifi::event::{EventInfo, WifiEvent},
 };
+
+// Names ESP-IDF renamed in v6.1. The ESP32-S31 is the only chip whose bindings
+// are generated against v6.1 headers, so the rest of this module can go on
+// using one spelling.
+#[cfg(esp32s31)]
+use include::{
+    wifi_bandwidth_t_WIFI_BW20 as wifi_bandwidth_t_WIFI_BW20_COMPAT,
+    wifi_bandwidth_t_WIFI_BW40 as wifi_bandwidth_t_WIFI_BW40_COMPAT,
+    wifi_interface_t_WIFI_IF_AP as wifi_interface_t_WIFI_IF_AP_COMPAT,
+    wifi_interface_t_WIFI_IF_STA as wifi_interface_t_WIFI_IF_STA_COMPAT,
+};
+#[cfg(not(esp32s31))]
+use include::{
+    esp_interface_t_ESP_IF_WIFI_AP as wifi_interface_t_WIFI_IF_AP_COMPAT,
+    esp_interface_t_ESP_IF_WIFI_STA as wifi_interface_t_WIFI_IF_STA_COMPAT,
+    wifi_bandwidth_t_WIFI_BW_HT20 as wifi_bandwidth_t_WIFI_BW20_COMPAT,
+    wifi_bandwidth_t_WIFI_BW_HT40 as wifi_bandwidth_t_WIFI_BW40_COMPAT,
+};
 pub mod ap;
 
 unstable_module!(
@@ -416,7 +434,16 @@ impl AuthenticationMethod {
             AuthenticationMethod::Wpa3EntSuiteB192Bit => {
                 include::wifi_auth_mode_t_WIFI_AUTH_WPA3_ENT_192
             }
+            // ESP-IDF v6.1 removed both modes. Their numeric slots (11, 12) are
+            // reserved as WIFI_AUTH_DUMMY_1/2, so aliasing to those would hand a
+            // v6.1 blob a value it no longer implements; report them as unknown.
+            #[cfg(esp32s31)]
+            AuthenticationMethod::Wpa3ExtPsk | AuthenticationMethod::Wpa3ExtPskMixed => {
+                include::wifi_auth_mode_t_WIFI_AUTH_UNKNOWN
+            }
+            #[cfg(not(esp32s31))]
             AuthenticationMethod::Wpa3ExtPsk => include::wifi_auth_mode_t_WIFI_AUTH_WPA3_EXT_PSK,
+            #[cfg(not(esp32s31))]
             AuthenticationMethod::Wpa3ExtPskMixed => {
                 include::wifi_auth_mode_t_WIFI_AUTH_WPA3_EXT_PSK_MIXED_MODE
             }
@@ -454,7 +481,9 @@ impl AuthenticationMethod {
             include::wifi_auth_mode_t_WIFI_AUTH_WPA3_ENT_192 => {
                 AuthenticationMethod::Wpa3EntSuiteB192Bit
             }
+            #[cfg(not(esp32s31))]
             include::wifi_auth_mode_t_WIFI_AUTH_WPA3_EXT_PSK => AuthenticationMethod::Wpa3ExtPsk,
+            #[cfg(not(esp32s31))]
             include::wifi_auth_mode_t_WIFI_AUTH_WPA3_EXT_PSK_MIXED_MODE => {
                 AuthenticationMethod::Wpa3ExtPskMixed
             }
@@ -1148,13 +1177,13 @@ pub(crate) fn wifi_init(_wifi: crate::hal::peripherals::WIFI<'_>) -> Result<(), 
         esp_wifi_result!(esp_wifi_set_tx_done_cb(Some(esp_wifi_tx_done_cb)))?;
 
         esp_wifi_result!(esp_wifi_internal_reg_rxcb(
-            esp_interface_t_ESP_IF_WIFI_STA,
+            wifi_interface_t_WIFI_IF_STA_COMPAT,
             Some(recv_cb_sta)
         ))?;
 
         // until we support APSTA we just register the same callback for AP and station
         esp_wifi_result!(esp_wifi_internal_reg_rxcb(
-            esp_interface_t_ESP_IF_WIFI_AP,
+            wifi_interface_t_WIFI_IF_AP_COMPAT,
             Some(recv_cb_ap)
         ))?;
 
@@ -1660,8 +1689,8 @@ pub enum Bandwidth {
 impl Bandwidth {
     fn to_raw(self) -> wifi_bandwidth_t {
         match self {
-            Bandwidth::_20MHz => wifi_bandwidth_t_WIFI_BW_HT20,
-            Bandwidth::_40MHz => wifi_bandwidth_t_WIFI_BW_HT40,
+            Bandwidth::_20MHz => wifi_bandwidth_t_WIFI_BW20_COMPAT,
+            Bandwidth::_40MHz => wifi_bandwidth_t_WIFI_BW40_COMPAT,
             Bandwidth::_80MHz => wifi_bandwidth_t_WIFI_BW80,
             Bandwidth::_160MHz => wifi_bandwidth_t_WIFI_BW160,
             Bandwidth::_80_80MHz => wifi_bandwidth_t_WIFI_BW80_BW80,
@@ -1670,8 +1699,8 @@ impl Bandwidth {
 
     fn from_raw(raw: wifi_bandwidth_t) -> Self {
         match raw {
-            raw if raw == wifi_bandwidth_t_WIFI_BW_HT20 => Bandwidth::_20MHz,
-            raw if raw == wifi_bandwidth_t_WIFI_BW_HT40 => Bandwidth::_40MHz,
+            raw if raw == wifi_bandwidth_t_WIFI_BW20_COMPAT => Bandwidth::_20MHz,
+            raw if raw == wifi_bandwidth_t_WIFI_BW40_COMPAT => Bandwidth::_40MHz,
             raw if raw == wifi_bandwidth_t_WIFI_BW80 => Bandwidth::_80MHz,
             raw if raw == wifi_bandwidth_t_WIFI_BW160 => Bandwidth::_160MHz,
             raw if raw == wifi_bandwidth_t_WIFI_BW80_BW80 => Bandwidth::_80_80MHz,
@@ -2583,6 +2612,12 @@ impl<'d> WifiController<'d> {
                 tx_hetb_queue_num: 3,
                 dump_hesigb_enable: false,
 
+                // Added by ESP-IDF v6.1. ESP-IDF's own WIFI_INIT_CONFIG_DEFAULT
+                // leaves both at zero.
+                #[cfg(esp32s31)]
+                privacy_enhancements: false,
+                #[cfg(esp32s31)]
+                rmac_auto_reset_int: 0,
                 magic: WIFI_INIT_CONFIG_MAGIC as i32,
             };
         }
@@ -3396,8 +3431,16 @@ ignored."
                 sae_pwe_h2e: 0,
                 csa_count: 3,
                 dtim_period: config.dtim_period,
+                #[cfg(not(esp32s31))]
                 transition_disable: 0,
+                #[cfg(not(esp32s31))]
                 sae_ext: 0,
+                // ESP-IDF v6.1 packed transition_disable and sae_ext into a
+                // bitfield (alongside a new wpa3_compatible_mode). Same values.
+                #[cfg(esp32s31)]
+                _bitfield_align_1: [],
+                #[cfg(esp32s31)]
+                _bitfield_1: wifi_ap_config_t::new_bitfield_1(0, 0, 0, 0),
                 bss_max_idle_cfg: include::wifi_bss_max_idle_config_t {
                     period: 0,
                     protected_keep_alive: false,

@@ -488,17 +488,31 @@ impl FineTimingMeasurementReport<'_> {
     }
 
     /// Returns an iterator over the detailed FTM report entries.
+    ///
+    /// **Always empty on the ESP32-S31.** ESP-IDF v6.1 removed
+    /// `ftm_report_data` from this event; the entries have to be fetched
+    /// separately with `esp_wifi_ftm_get_report()`. An empty iterator here
+    /// therefore means "not carried by the event", not "no entries".
     pub fn entries(&self) -> impl Iterator<Item = FineTimingMeasurementReportEntry<'_>> + '_ {
-        let ptr = self.0.ftm_report_data;
-        let len = self.0.ftm_report_num_entries as usize;
+        // ESP-IDF v6.1 dropped `ftm_report_data` from the event, so there is no
+        // pointer to read here at all. Build the empty slice directly rather
+        // than from a null one, which is UB even at length zero.
+        #[cfg(esp32s31)]
+        let entries_slice: &[crate::sys::include::wifi_ftm_report_entry_t] = &[];
 
-        // Return an empty slice when there are no entries.
-        let entries_slice = if ptr.is_null() || len == 0 {
-            &[]
-        } else {
-            // Otherwise, it's the slice from the data.
-            // Can we trust the C API to provide a valid pointer and length?
-            unsafe { core::slice::from_raw_parts(ptr, len) }
+        #[cfg(not(esp32s31))]
+        let entries_slice = {
+            let ptr = self.0.ftm_report_data;
+            let len = self.0.ftm_report_num_entries as usize;
+
+            // Return an empty slice when there are no entries.
+            if ptr.is_null() || len == 0 {
+                &[]
+            } else {
+                // Otherwise, it's the slice from the data.
+                // Can we trust the C API to provide a valid pointer and length?
+                unsafe { core::slice::from_raw_parts(ptr, len) }
+            }
         };
 
         entries_slice.iter().map(FineTimingMeasurementReportEntry)
@@ -655,8 +669,18 @@ impl NeighborAwarenessNetworkingReceive<'_> {
     }
 
     /// Get Peer Service Info.
+    #[cfg(not(esp32s31))]
     pub fn peer_svc_info(&self) -> &[u8; 64] {
         &self.0.peer_svc_info
+    }
+
+    /// Get Peer Service Info.
+    ///
+    /// ESP-IDF v6.1 replaced the fixed 64-byte field with a variable-length
+    /// `ssi` and its `ssi_len`, so this returns a slice rather than an array.
+    #[cfg(esp32s31)]
+    pub fn peer_svc_info(&self) -> &[u8] {
+        unsafe { self.0.ssi.as_slice(self.0.ssi_len as usize) }
     }
 }
 
@@ -682,8 +706,18 @@ impl NeighborDiscoveryProtocolIndication<'_> {
     }
 
     /// Get Service Specific Info.
+    #[cfg(not(esp32s31))]
     pub fn svc_info(&self) -> &[u8; 64] {
         &self.0.svc_info
+    }
+
+    /// Get Service Specific Info.
+    ///
+    /// ESP-IDF v6.1 replaced the fixed 64-byte field with a variable-length
+    /// `ssi` and its `ssi_len`, so this returns a slice rather than an array.
+    #[cfg(esp32s31)]
+    pub fn svc_info(&self) -> &[u8] {
+        unsafe { self.0.ssi.as_slice(self.0.ssi_len as usize) }
     }
 }
 
@@ -714,8 +748,18 @@ impl NeighborDiscoveryProtocolConfirmation<'_> {
     }
 
     /// Get Service Specific Info.
+    #[cfg(not(esp32s31))]
     pub fn svc_info(&self) -> &[u8; 64] {
         &self.0.svc_info
+    }
+
+    /// Get Service Specific Info.
+    ///
+    /// ESP-IDF v6.1 replaced the fixed 64-byte field with a variable-length
+    /// `ssi` and its `ssi_len`, so this returns a slice rather than an array.
+    #[cfg(esp32s31)]
+    pub fn svc_info(&self) -> &[u8] {
+        unsafe { self.0.ssi.as_slice(self.0.ssi_len as usize) }
     }
 }
 
@@ -761,7 +805,16 @@ impl HomeChannelChange<'_> {
 impl StationNeighborRep<'_> {
     /// Get the Neighbor Report received from the access point.
     pub fn report(&self) -> &[u8] {
-        &self.0.report[..self.0.report_len as usize]
+        #[cfg(not(esp32s31))]
+        {
+            &self.0.report[..self.0.report_len as usize]
+        }
+        // ESP-IDF v6.1 removed the deprecated fixed-size `report`, leaving the
+        // variable-length `n_report` it had already told callers to move to.
+        #[cfg(esp32s31)]
+        unsafe {
+            self.0.n_report.as_slice(self.0.report_len as usize)
+        }
     }
 
     /// Get the length of report.
