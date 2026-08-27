@@ -7,6 +7,7 @@
 #[cfg_attr(esp32h2, path = "esp32h2.rs")]
 #[cfg_attr(esp32s2, path = "esp32s2.rs")]
 #[cfg_attr(esp32s3, path = "esp32s3.rs")]
+#[cfg_attr(esp32s31, path = "esp32s31.rs")]
 pub(crate) mod os_adapter_chip_specific;
 
 use core::ptr::NonNull;
