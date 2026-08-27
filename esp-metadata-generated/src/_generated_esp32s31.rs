@@ -286,6 +286,24 @@ macro_rules! property {
     ("usb_otg_hs.fifo_depth_words", str) => {
         stringify!(896)
     };
+    ("wifi.has_wifi6") => {
+        true
+    };
+    ("wifi.mac_version") => {
+        3
+    };
+    ("wifi.mac_version", str) => {
+        stringify!(3)
+    };
+    ("wifi.has_5g") => {
+        false
+    };
+    ("wifi.csi_supported") => {
+        true
+    };
+    ("phy.combo_module") => {
+        true
+    };
     ("sdm.channel_count") => {
         8
     };
