@@ -473,16 +473,17 @@ slot_config = [
 
 ## Radio
 [device.wifi]
-support_status = "not_supported"
-mac_version = 1 # FIXME: placeholder
-csi_supported = true # FIXME: placeholder
+support_status = "partial"
+has_wifi6 = true
+mac_version = 3
+csi_supported = true
 
 [device.bt]
 support_status = "not_supported"
 controller = "npl" # FIXME: placeholder
 
 [device.phy]
-support_status = "not_supported"
+combo_module = true
 
 [device.ledc]
 support_status = "not_supported"
