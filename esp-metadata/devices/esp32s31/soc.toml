@@ -77,6 +77,7 @@ peripherals = [
     { name = "MEM_MONITOR", pac = "MEM_MONITOR0" },
     { name = "MODEM_LPCON" },
     { name = "MODEM_SYSCON" },
+    { name = "WIFI", virtual = true, interrupts = { bb = "WIFI_BB", mac = "WIFI_MAC", pwr = "WIFI_PWR" }, stable = true },
     { name = "PAU" },
     { name = "PMU" },
     { name = "RTC_TIMER", pac = "LP_TIMER" },
