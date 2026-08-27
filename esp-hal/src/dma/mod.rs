@@ -267,6 +267,21 @@ pub enum DmaTxInterrupt {
     /// Triggered when all data corresponding to a transmit descriptor have been
     /// sent via transmit channel.
     Done,
+
+    /// Triggered when the transmit FIFO overflows.
+    ///
+    /// On chips whose transmit FIFO is split into levels (ESP32-S3: L1 and L3)
+    /// this variant covers *every* level — listening arms each level's bit,
+    /// clearing clears them all, and it reports pending if any level
+    /// overflowed. Read the `OUT_INT_RAW` register directly if you need to
+    /// know which level.
+    #[cfg(dma_gdma_version = "1")]
+    FifoOverflow,
+
+    /// Triggered when the transmit FIFO underflows. See
+    /// [`Self::FifoOverflow`] for the multi-level note.
+    #[cfg(dma_gdma_version = "1")]
+    FifoUnderflow,
 }
 
 /// Types of interrupts emitted by the RX channel.
@@ -294,6 +309,26 @@ pub enum DmaRxInterrupt {
     /// Triggered when all data corresponding to a receive descriptor have been
     /// received via receive channel.
     Done,
+
+    /// Triggered when the receive FIFO fills past
+    /// `IN_CONF1.DMA_INFIFO_FULL_THRS`.
+    #[cfg(esp32s3)]
+    FifoFullWatermark,
+
+    /// Triggered when the receive FIFO overflows.
+    ///
+    /// On chips whose receive FIFO is split into levels (ESP32-S3: L1 and L3)
+    /// this variant covers *every* level — listening arms each level's bit,
+    /// clearing clears them all, and it reports pending if any level
+    /// overflowed. Read the `IN_INT_RAW` register directly if you need to know
+    /// which level.
+    #[cfg(dma_gdma_version = "1")]
+    FifoOverflow,
+
+    /// Triggered when the receive FIFO underflows. See
+    /// [`Self::FifoOverflow`] for the multi-level note.
+    #[cfg(dma_gdma_version = "1")]
+    FifoUnderflow,
 }
 
 /// The default chunk size used for DMA transfers.
