@@ -148,8 +148,15 @@ pub(crate) static __ESP_RADIO_G_WIFI_OSI_FUNCS: wifi_osi_funcs_t = wifi_osi_func
     _rand: Some(rand),
     _dport_access_stall_other_cpu_start_wrap: Some(dport_access_stall_other_cpu_start_wrap),
     _dport_access_stall_other_cpu_end_wrap: Some(dport_access_stall_other_cpu_end_wrap),
+    // ESP-IDF v6.1 renamed these two; same slot, same signature.
+    #[cfg(not(esp32s31))]
     _wifi_apb80m_request: Some(wifi_apb80m_request),
+    #[cfg(not(esp32s31))]
     _wifi_apb80m_release: Some(wifi_apb80m_release),
+    #[cfg(esp32s31)]
+    _wifi_pm_sleep_lock_acquire: Some(wifi_apb80m_request),
+    #[cfg(esp32s31)]
+    _wifi_pm_sleep_lock_release: Some(wifi_apb80m_release),
     _phy_disable: Some(os_adapter::phy_disable),
     _phy_enable: Some(os_adapter::phy_enable),
     _phy_update_country_info: Some(phy_update_country_info),
@@ -217,7 +224,7 @@ pub(crate) static __ESP_RADIO_G_WIFI_OSI_FUNCS: wifi_osi_funcs_t = wifi_osi_func
     _coex_schm_curr_period_get: Some(coex_schm_curr_period_get),
     _coex_schm_curr_phase_get: Some(coex_schm_curr_phase_get),
     #[cfg(any(
-        esp32c3, esp32c2, esp32c5, esp32c6, esp32c61, esp32h2, esp32s3, esp32s2
+        esp32c3, esp32c2, esp32c5, esp32c6, esp32c61, esp32h2, esp32s3, esp32s2, esp32s31
     ))]
     _slowclk_cal_get: Some(slowclk_cal_get),
     #[cfg(any(esp32, esp32s2))]
@@ -226,11 +233,11 @@ pub(crate) static __ESP_RADIO_G_WIFI_OSI_FUNCS: wifi_osi_funcs_t = wifi_osi_func
     _phy_common_clock_enable: Some(os_adapter_chip_specific::phy_common_clock_enable),
     _coex_register_start_cb: Some(coex_register_start_cb),
 
-    #[cfg(any(esp32c6, esp32c5, esp32c61))]
+    #[cfg(any(esp32c6, esp32c5, esp32c61, esp32s31))]
     _regdma_link_set_write_wait_content: Some(
         os_adapter_chip_specific::regdma_link_set_write_wait_content_dummy,
     ),
-    #[cfg(any(esp32c6, esp32c5, esp32c61))]
+    #[cfg(any(esp32c6, esp32c5, esp32c61, esp32s31))]
     _sleep_retention_find_link_by_id: Some(
         os_adapter_chip_specific::sleep_retention_find_link_by_id_dummy,
     ),
@@ -240,6 +247,22 @@ pub(crate) static __ESP_RADIO_G_WIFI_OSI_FUNCS: wifi_osi_funcs_t = wifi_osi_func
     _coex_schm_flexible_period_set: Some(coex_schm_flexible_period_set),
     _coex_schm_flexible_period_get: Some(coex_schm_flexible_period_get),
     _coex_schm_get_phase_by_idx: Some(coex_schm_get_phase_by_idx),
+
+    // Added by the ESP-IDF v6.1 table (ABI version 9). Left unimplemented
+    // rather than guessed at: nothing on the Wi-Fi STA path calls them, and a
+    // wrong body here is worse than a loud one.
+    #[cfg(esp32s31)]
+    _coex_configure_preemption_end_cb: None,
+    #[cfg(esp32s31)]
+    _wifi_disable_ac_ax: None,
+    #[cfg(esp32s31)]
+    _wifi_bb_sleep_retention_attach: None,
+    #[cfg(esp32s31)]
+    _wifi_bb_sleep_retention_detach: None,
+    #[cfg(esp32s31)]
+    _wifi_mac_sleep_retention_attach: None,
+    #[cfg(esp32s31)]
+    _wifi_mac_sleep_retention_detach: None,
 
     _magic: ESP_WIFI_OS_ADAPTER_MAGIC as i32,
 };
