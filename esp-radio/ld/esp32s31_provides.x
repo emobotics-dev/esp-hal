@@ -15,6 +15,7 @@ EXTERN( __esp_radio_putchar );
 EXTERN( __esp_radio_puts );
 EXTERN( __esp_radio_esp_timer_get_time );
 EXTERN( __esp_radio_vTaskDelay );
+EXTERN( __esp_radio_esp_event_post );
 EXTERN( __esp_radio_sleep );
 EXTERN( __esp_radio_usleep );
 
@@ -30,6 +31,7 @@ PROVIDE( putchar = __esp_radio_putchar );
 PROVIDE( puts = __esp_radio_puts );
 PROVIDE( esp_timer_get_time = __esp_radio_esp_timer_get_time );
 PROVIDE( vTaskDelay = __esp_radio_vTaskDelay );
+PROVIDE( esp_event_post = __esp_radio_esp_event_post );
 PROVIDE( sleep = __esp_radio_sleep );
 PROVIDE( usleep = __esp_radio_usleep );
 
