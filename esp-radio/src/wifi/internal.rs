@@ -96,6 +96,57 @@ unsafe extern "C" fn semphr_give_from_isr_wrapper(semphr: *mut c_void, hptw: *mu
     unsafe { crate::common_adapter::semphr_give_from_isr(semphr, hptw as *mut bool) }
 }
 
+/// `bool wifi_disable_ac_ax(void)`
+///
+/// Whether to disable 802.11ac/ax. ESP-IDF's own ESP32-S31 adapter returns
+/// `false`, commented "disable 11ac and 11ax is not supported on esp32s31" --
+/// this mirrors it rather than inventing an answer.
+#[cfg(esp32s31)]
+unsafe extern "C" fn wifi_disable_ac_ax() -> bool {
+    false
+}
+
+/// `int coex_configure_preemption_end_cb(bool, int (*)(uint32_t))`
+///
+/// ESP-IDF's ESP32-S31 adapter returns 0 unless software coexistence *and* BLE
+/// ISO are both configured. Neither is here -- this build has no coexistence
+/// blob at all -- so 0 is the whole of it. `ic_init` calls this during
+/// `WifiController::new`.
+#[cfg(esp32s31)]
+unsafe extern "C" fn coex_configure_preemption_end_cb(
+    _is_register: bool,
+    _cb: Option<unsafe extern "C" fn(u32) -> i32>,
+) -> i32 {
+    0
+}
+
+/// The four modem sleep-retention hooks.
+///
+/// ESP-IDF gates each on `CONFIG_MAC_BB_PD` and returns 1 when it is off, which
+/// is this configuration: nothing here powers the MAC/BB down between frames.
+/// They are on the sleep path rather than the STA bring-up path, but a null
+/// entry is an instruction fetch from zero if the blob ever reaches one, so
+/// they are filled with the same answer ESP-IDF gives.
+#[cfg(esp32s31)]
+unsafe extern "C" fn wifi_bb_sleep_retention_attach() -> i32 {
+    1
+}
+
+#[cfg(esp32s31)]
+unsafe extern "C" fn wifi_bb_sleep_retention_detach() -> i32 {
+    1
+}
+
+#[cfg(esp32s31)]
+unsafe extern "C" fn wifi_mac_sleep_retention_attach() -> i32 {
+    1
+}
+
+#[cfg(esp32s31)]
+unsafe extern "C" fn wifi_mac_sleep_retention_detach() -> i32 {
+    1
+}
+
 #[unsafe(no_mangle)]
 pub(crate) static __ESP_RADIO_G_WIFI_OSI_FUNCS: wifi_osi_funcs_t = wifi_osi_funcs_t {
     _version: ESP_WIFI_OS_ADAPTER_VERSION as i32,
@@ -249,20 +300,23 @@ pub(crate) static __ESP_RADIO_G_WIFI_OSI_FUNCS: wifi_osi_funcs_t = wifi_osi_func
     _coex_schm_get_phase_by_idx: Some(coex_schm_get_phase_by_idx),
 
     // Added by the ESP-IDF v6.1 table (ABI version 9). Left unimplemented
-    // rather than guessed at: nothing on the Wi-Fi STA path calls them, and a
-    // wrong body here is worse than a loud one.
+    // rather than guessed at, EXCEPT where the blobs are known to call them: a
+    // null entry is not inert, it is an instruction fetch from address zero.
     #[cfg(esp32s31)]
-    _coex_configure_preemption_end_cb: None,
+    _coex_configure_preemption_end_cb: Some(coex_configure_preemption_end_cb),
+    // `wifi_nvs_validate_phymode` calls this during `WifiController::new`, on
+    // the plain STA path -- it was `None`, and the first Wi-Fi call on an
+    // ESP32-S31 died with `Instruction access fault (1) mepc=0x00000000`.
     #[cfg(esp32s31)]
-    _wifi_disable_ac_ax: None,
+    _wifi_disable_ac_ax: Some(wifi_disable_ac_ax),
     #[cfg(esp32s31)]
-    _wifi_bb_sleep_retention_attach: None,
+    _wifi_bb_sleep_retention_attach: Some(wifi_bb_sleep_retention_attach),
     #[cfg(esp32s31)]
-    _wifi_bb_sleep_retention_detach: None,
+    _wifi_bb_sleep_retention_detach: Some(wifi_bb_sleep_retention_detach),
     #[cfg(esp32s31)]
-    _wifi_mac_sleep_retention_attach: None,
+    _wifi_mac_sleep_retention_attach: Some(wifi_mac_sleep_retention_attach),
     #[cfg(esp32s31)]
-    _wifi_mac_sleep_retention_detach: None,
+    _wifi_mac_sleep_retention_detach: Some(wifi_mac_sleep_retention_detach),
 
     _magic: ESP_WIFI_OS_ADAPTER_MAGIC as i32,
 };
