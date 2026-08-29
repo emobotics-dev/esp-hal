@@ -545,9 +545,15 @@ for_each_analog_function! {
                             w.fun_wpd().clear_bit()
                         });
 
-                        GPIO::regs()
-                            .enable_w1tc()
-                            .write(|w| unsafe { w.bits(1 << self.number()) });
+                        // Float the pad for the SAR by disabling its output
+                        // driver, through the bank helpers rather than a direct
+                        // write: `1 << number()` overflows for any pin above
+                        // 31, and on a chip whose ADC pins all sit in the upper
+                        // bank (ESP32-S31: GPIO42-57) that is every analog pin.
+                        // With overflow checks the shift panics; without them it
+                        // silently wraps and clears an unrelated pin in bank 0.
+                        low_level::bank(self.number())
+                            .write_out_en(1 << (self.number() % 32), false);
                     }
                 }
             }
