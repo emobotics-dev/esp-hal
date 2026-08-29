@@ -269,6 +269,31 @@ impl<'d> Aes<'d> {
         self.clear_key();
     }
 
+    /// Encrypts several blocks under one key, writing the key once.
+    ///
+    /// [`Self::encrypt`] rewrites the key and the mode registers for every
+    /// block, and clears the key registers afterwards where the chip supports
+    /// it. That setup dominates for short buffers: on the ESP32-S31 a 164-byte
+    /// AES-GCM record cost ~57 us per block through the single-block call,
+    /// against a block time that is a fraction of that. Callers with more than
+    /// one block to do -- counter-mode keystreams, in particular -- should use
+    /// this instead.
+    pub fn encrypt_blocks(&mut self, blocks: &mut [[u8; 16]], key: impl Into<Key>) {
+        let key = key.into();
+        let mode = key.encrypt_mode();
+        self.write_key(key.as_slice());
+        self.write_mode(mode);
+        for block in blocks.iter_mut() {
+            self.write_block(block);
+            self.start();
+            while !(self.is_idle()) {}
+            self.read_block(block);
+        }
+        // Same reasoning as `process`: the hardware keeps a copy of the key.
+        #[cfg(clear_crypto_secrets)]
+        self.clear_key();
+    }
+
     /// Encrypts the given buffer with the given key.
     pub fn encrypt(&mut self, block: &mut [u8; 16], key: impl Into<Key>) {
         let key = key.into();
