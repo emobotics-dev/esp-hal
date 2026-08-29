@@ -117,8 +117,12 @@ impl RegisterAccess for crate::peripherals::ADC1<'_> {
         let regs = APB_SARADC::regs();
 
         // Each pattern entry is 6 bits wide and the first entry occupies the
-        // most significant bits of the 24-bit table.
-        let entry = (((channel & 0xf) as u32) << 2) << 18;
+        // most significant bits of the 24-bit table: channel in [5:2], and
+        // bit 0 selects a single-ended conversion. Without that bit the SAR
+        // still runs and still raises `done`, but returns 0 - which is how a
+        // whole ADC looks like silence rather than an error.
+        const PATT_SINGLE_ENDED: u32 = 1;
+        let entry = ((((channel & 0xf) as u32) << 2) | PATT_SINGLE_ENDED) << 18;
 
         regs.ctrl0().modify(|_, w| unsafe {
             w.sar1_patt_type().set_bit();

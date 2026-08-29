@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Fixed `set_analog` clearing the wrong pin's output enable for GPIOs above 31, which made every ADC pin unusable on chips whose analog pins sit in the upper bank
+- ESP32-S31: Fixed the ADC returning 0 for every conversion, by setting the single-ended model bit in the pattern-table entry
 
 ### Removed
 
