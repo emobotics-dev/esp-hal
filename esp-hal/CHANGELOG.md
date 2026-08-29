@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ESP32-S31: Fixed the ADC returning 0 for every conversion, by setting the single-ended model bit in the pattern-table entry
 
 ### Removed
 
