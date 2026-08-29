@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed `set_analog` clearing the wrong pin's output enable for GPIOs above 31, which made every ADC pin unusable on chips whose analog pins sit in the upper bank
 
 ### Removed
 
