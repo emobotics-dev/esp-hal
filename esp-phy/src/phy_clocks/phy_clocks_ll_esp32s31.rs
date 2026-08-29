@@ -39,6 +39,16 @@ pub(crate) fn enable_phy(en: bool) {
     // `modem_syscon_ll_enable_*` in `hal/esp32s31/include/hal/
     // modem_syscon_ll.h`. Transcribed, not inferred.
     let syscon = regs!(MODEM_SYSCON);
+
+    // ESP-IDF pulses the baseband reset before enabling its clocks
+    // (`modem_clock_wifi_bb_configure` -> `modem_syscon_ll_reset_wifibb`).
+    // Without it the radio comes up but never receives -- a scan returns zero
+    // access points against an AP beaconing a metre away.
+    if en {
+        syscon.modem_rst_conf().modify(|_, w| w.rst_wifibb().set_bit());
+        syscon.modem_rst_conf().modify(|_, w| w.rst_wifibb().clear_bit());
+    }
+
     syscon.clk_conf1().modify(|r, w| {
         // MODEM_CLOCK_WIFI_BB: one masked write in ESP-IDF, kept as one here.
         let bits = if en { r.bits() | WIFI_BB_CLK_CONF1 } else { r.bits() & !WIFI_BB_CLK_CONF1 };
