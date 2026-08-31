@@ -1,10 +1,13 @@
+// esp32 only: the MISO timing compensation in `Esp32Hack` is the sole atomic
+// state here, and it does not exist on other targets.
 #[cfg(spi_master_version = "1")]
+use core::sync::atomic::{AtomicU8, AtomicU16};
 use core::{
     cell::UnsafeCell,
     future::Future,
     mem::MaybeUninit,
     pin::Pin,
-    sync::atomic::{AtomicU8, AtomicU16, AtomicUsize, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
     task::{Context, Poll},
 };
 
