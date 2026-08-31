@@ -1,8 +1,10 @@
 use enumset::EnumSet;
 
+use core::sync::atomic::Ordering;
+
 use super::{
     super::{DataMode, SpiInterrupt},
-    Driver,
+    Driver, MISO_DELAY_NONE,
 };
 use crate::{
     RegisterToggle,
@@ -142,12 +144,11 @@ pub(super) fn apply_config(driver: &Driver) {
         .state
         .esp32_hack
         .extra_dummy
-        .set(dummy_required as u8);
-    driver
-        .state
-        .esp32_hack
-        .timing_miso_delay
-        .set(timing_miso_delay);
+        .store(dummy_required as u8, Ordering::Relaxed);
+    driver.state.esp32_hack.timing_miso_delay.store(
+        timing_miso_delay.map_or(MISO_DELAY_NONE, u16::from),
+        Ordering::Relaxed,
+    );
 }
 
 pub(super) fn set_data_mode(driver: &Driver, data_mode: Mode) {
@@ -177,8 +178,9 @@ pub(super) fn prepare_half_duplex(driver: &Driver, is_write: bool, dummy: u8) ->
 
         if !is_write {
             // Values are set up in apply_config.
-            let timing_miso_delay = driver.state.esp32_hack.timing_miso_delay.get();
-            let extra_dummy = driver.state.esp32_hack.extra_dummy.get();
+            let raw = driver.state.esp32_hack.timing_miso_delay.load(Ordering::Relaxed);
+            let timing_miso_delay = if raw == MISO_DELAY_NONE { None } else { Some(raw as u8) };
+            let extra_dummy = driver.state.esp32_hack.extra_dummy.load(Ordering::Relaxed);
             dummy += extra_dummy;
 
             if let Some(delay) = timing_miso_delay {
