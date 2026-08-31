@@ -2196,6 +2196,13 @@ struct DmaState {
     default_tx_buffer: UnsafeCell<InternalMemory<[u8; 4]>>,
 }
 
+/// Compile-time regression guard: these gate every `wait_for_idle` and are
+/// written by the ISR, so a revert to `Cell` is UB that no test can see.
+fn _dma_flags_stay_atomic(s: &DmaState) {
+    let _: &AtomicBool = &s.tx_transfer_in_progress;
+    let _: &AtomicBool = &s.rx_transfer_in_progress;
+}
+
 impl DmaState {
     // Syntactic helper to get a mutable reference to the "empty" RX DMA buffer.
     //
