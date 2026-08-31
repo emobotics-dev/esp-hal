@@ -552,6 +552,7 @@ impl<'d> SpiDma<'d, Async> {
         if !self.is_done() {
             Fut(self.driver()).await;
         }
+        }
 
         if self.dma_driver().state.tx_transfer_in_progress.load(Ordering::Relaxed) {
             // In case DMA TX buffer is bigger than what the SPI consumes, stop the DMA.
@@ -560,6 +561,15 @@ impl<'d> SpiDma<'d, Async> {
             }
             self.dma_driver().state.tx_transfer_in_progress.store(false, Ordering::Relaxed);
         }
+
+        // The caller reads the DMA-written RX buffer straight after this
+        // returns, so the completion check must be ordered before those loads.
+        // The blocking wait has always ended with this fence; the async path —
+        // the one the SD driver uses — did not, leaving the buffer reads free
+        // to be hoisted above the done-check. A stale busy token then makes the
+        // driver wait out every internal bound and report a >20 s stall on a
+        // card that was never slow.
+        fence(Ordering::Acquire);
     }
 
     /// Fills the given buffer with data from the bus.
