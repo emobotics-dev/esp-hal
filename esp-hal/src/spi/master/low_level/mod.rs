@@ -1,5 +1,7 @@
+// esp32 only: the MISO timing compensation in `Esp32Hack` is the sole atomic
+// state here, and it does not exist on other targets.
 #[cfg(spi_master_version = "1")]
-use core::cell::Cell;
+use core::sync::atomic::{AtomicU8, AtomicU16};
 use core::{
     cell::UnsafeCell,
     future::Future,
@@ -1001,8 +1003,8 @@ for_each_spi_master! {
 
                     #[cfg(spi_master_version = "1")]
                     esp32_hack: Esp32Hack {
-                        timing_miso_delay: Cell::new(None),
-                        extra_dummy: Cell::new(0),
+                        timing_miso_delay: AtomicU16::new(MISO_DELAY_NONE),
+                        extra_dummy: AtomicU8::new(0),
                     },
                 };
 
@@ -1052,12 +1054,24 @@ impl State {
     }
 }
 
+/// esp32 MISO timing compensation: written by `apply_config`, read by
+/// `setup_half_duplex`.
+///
+/// Atomic, not `Cell`: this lives in a `static State` reached by the task,
+/// the other core and the ISR, so `Cell` is a data race by construction and
+/// the `Sync` impl below was covering for it. `Option<u8>` is encoded as
+/// `u16` because there is no atomic for the niche.
 #[cfg(spi_master_version = "1")]
 pub(super) struct Esp32Hack {
-    timing_miso_delay: Cell<Option<u8>>,
-    extra_dummy: Cell<u8>,
+    timing_miso_delay: AtomicU16,
+    extra_dummy: AtomicU8,
 }
 
+#[cfg(spi_master_version = "1")]
+const MISO_DELAY_NONE: u16 = 0x100;
+
+// SAFETY: every field is atomic, or an `UnsafeCell` whose access is
+// documented at its use site (`State::pins`).
 unsafe impl Sync for State {}
 
 #[ram]
