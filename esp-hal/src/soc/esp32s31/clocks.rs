@@ -532,16 +532,45 @@ fn configure_iomux_function_clock_impl(
 }
 
 impl TimgInstance {
-    fn enable_function_clock_impl(self, _clocks: &mut ClockTree, _en: bool) {
-        // TODO: Control the selected timer's function-clock gate.
+    fn enable_function_clock_impl(self, _clocks: &mut ClockTree, en: bool) {
+        let regs = HP_SYS_CLKRST::regs();
+        match self {
+            TimgInstance::Timg0 => regs.timergrp0_ctrl0().modify(|_, w| {
+                w.t0_clk_en().bit(en);
+                w.t1_clk_en().bit(en)
+            }),
+            TimgInstance::Timg1 => regs.timergrp1_ctrl0().modify(|_, w| {
+                w.t0_clk_en().bit(en);
+                w.t1_clk_en().bit(en)
+            }),
+        };
     }
     fn configure_function_clock_impl(
         self,
         _clocks: &mut ClockTree,
         _old: Option<TimgFunctionClockConfig>,
-        _new: TimgFunctionClockConfig,
+        new: TimgFunctionClockConfig,
     ) {
-        // TODO: Configure the selected timer's function-clock source.
+        // Same encoding as RMT above: 0 = XTAL, 1 = RC_FAST, 2 = PLL_F80M. The
+        // PAC documents these bits as `need_des`; the mapping was measured --
+        // left unprogrammed the timer sits on XTAL while the driver computes
+        // ticks for PLL_F80M, so every timeout was armed exactly 2x too long.
+        let bits = match new {
+            TimgFunctionClockConfig::XtalClk => 0,
+            TimgFunctionClockConfig::RcFastClk => 1,
+            TimgFunctionClockConfig::PllF80m => 2,
+        };
+        let regs = HP_SYS_CLKRST::regs();
+        match self {
+            TimgInstance::Timg0 => regs.timergrp0_ctrl0().modify(|_, w| unsafe {
+                w.t0_src_sel().bits(bits);
+                w.t1_src_sel().bits(bits)
+            }),
+            TimgInstance::Timg1 => regs.timergrp1_ctrl0().modify(|_, w| unsafe {
+                w.t0_src_sel().bits(bits);
+                w.t1_src_sel().bits(bits)
+            }),
+        };
     }
 
     fn enable_wdt_clock_impl(self, _clocks: &mut ClockTree, _en: bool) {
