@@ -274,9 +274,73 @@ pub(crate) mod quad_spi_impl {
 
         // Configure SPI0 PSRAM related SPI Phases
         config_psram_spi_phases();
+        // Flash above 80 MHz STR cannot be fetched from until the delay line is
+        // tuned, and the tuning cannot run at that speed either -- so it happens
+        // here, in a deliberately slow window.
+        //
+        // The trick is IDF's: drop BOTH controllers to 20 MHz first. At that
+        // speed every candidate `din_mode`/`din_num` still samples correctly, so
+        // SPI0 keeps serving instruction fetches while SPI1 alone is driven at
+        // the target clock and swept. `din_mode`/`din_num` are shared, which is
+        // exactly why SPI0 has to be slow while they are being changed.
+        let tuned = if flash_clock_divider(config) == 2
+            && config.core_clock.unwrap_or_default()
+                == SpiTimingConfigCoreClock::SpiTimingConfigCoreClock240m
+        {
+            mspi_timing_enter_low_speed_mode(true);
+
+            // The sweep has to run at the TARGET module clock, and
+            // `enter_low_speed_mode` leaves the core at 80 MHz -- so a divider of
+            // 1 on SPI1 there yields 80 MHz, not 120, and every candidate is
+            // validated at a speed it will never run at. That is what made 9 of
+            // 12 pass and the winner arbitrary.
+            //
+            // Raise the core to the target inside a cache suspension, and keep
+            // SPI0 divided down (120/6 = 20 MHz) so instruction fetches stay in
+            // the safe region while SPI1 is driven at full speed below.
+            unsafe extern "C" {
+                fn rom_Cache_Suspend_ICache() -> u32;
+                fn Cache_Resume_ICache(autoload: u32);
+                fn Cache_Invalidate_ICache_All();
+            }
+            let al = unsafe { rom_Cache_Suspend_ICache() };
+            spi0_timing_config_set_core_clock(
+                SpiTimingConfigCoreClock::SpiTimingConfigCoreClock240m,
+            );
+            spi0_timing_config_set_flash_clock(12);
+            spi1_timing_config_set_flash_clock(12);
+
+            // Power on HCLK, the delay line's own clock
+            // (`mspi_timinng_ll_enable_flash_timing_adjust_clk`). Without this
+            // bit `din_mode`/`din_num` are INERT -- the sweep then measures
+            // nothing and its "winner" is arbitrary, which is what made every
+            // earlier 120 MHz result luck.
+            SPI0::regs().timing_cali().modify(|_, w| w.timing_clk_ena().set_bit());
+            // Variable-dummy mode must be off while tuning, or the reads come
+            // back with a dummy count the comparison never accounts for.
+            SPI1::regs().ddr().modify(|_, w| w.spi_fmem_var_dummy().clear_bit());
+            unsafe {
+                Cache_Invalidate_ICache_All();
+                Cache_Resume_ICache(al);
+            }
+
+            let base_dummy = unsafe { rom_dummy_len_plus().add(1).read_volatile() };
+
+            let mut reference = [0u8; TUNING_LEN];
+            tuning_read(&mut reference);
+
+            // SPI1 only: the bus under test moves to the target clock, the bus we
+            // are executing from does not.
+            spi1_timing_config_set_flash_clock(2);
+            let best = flash_tuning(&reference, base_dummy);
+            Some((best, base_dummy))
+        } else {
+            None
+        };
+
         // Back to the high speed mode. Flash/PSRAM clocks are set to the clock that
         // user selected. SPI0/1 registers are all set correctly
-        mspi_timing_enter_high_speed_mode(true, config);
+        mspi_timing_enter_high_speed_mode(true, config, tuned);
 
         info!("PSRAM initialized successfully in Quad SPI mode");
         true
@@ -391,6 +455,158 @@ pub(crate) mod quad_spi_impl {
         // see https://github.com/espressif/esp-idf/blob/4e24516ee2731eb55687182d4e061b5b93a9e33f/components/esp_hw_support/mspi_timing_tuning.c#L391-L415
     }
 
+    /// Flash timing candidates for core 240 MHz / module 120 MHz, STR mode:
+    /// `(din_mode, din_num, extra_dummy)`. Straight from IDF's
+    /// `MSPI_TIMING_FLASH_CONFIG_TABLE_CORE_CLK_240M_MODULE_CLK_120M_STR_MODE`.
+    /// IDF has a sibling table for core 120 / module 120; both were tried.
+    const FLASH_TUNING_CORE240M_MOD120M_STR: [(u8, u8, u8); 12] = [
+        (1, 0, 0),
+        (0, 0, 0),
+        (1, 1, 1),
+        (2, 3, 2),
+        (1, 0, 1),
+        (0, 0, 1),
+        (1, 1, 2),
+        (2, 3, 3),
+        (1, 0, 2),
+        (0, 0, 2),
+        (1, 1, 3),
+        (2, 3, 4),
+    ];
+
+    /// The ROM's QIO read dummy (`SPI1_R_QIO_DUMMY_CYCLELEN`).
+    const QIO_DUMMY_CYCLELEN: u8 = 5;
+    /// Where the tuning reads its reference pattern, and how much of it. The
+    /// second-stage bootloader lives at 0x1000 and is never blank -- a blank
+    /// region would read 0xFF under every candidate and "pass" all of them.
+    const TUNING_ADDR: u32 = 0x1000;
+    const TUNING_LEN: usize = 64;
+
+    /// `rom_spiflash_legacy_data->dummy_len_plus`.
+    ///
+    /// On the S3 this is not a linker symbol but a field reached through a ROM
+    /// pointer at 0x3fce_ffe4; `esp_rom_spiflash_chip_t` is six `u32`s, so the
+    /// array starts 24 bytes in.
+    #[ram]
+    fn rom_dummy_len_plus() -> *mut u8 {
+        const ROM_SPIFLASH_LEGACY_DATA: *const *mut u8 = 0x3fce_ffe4 as *const *mut u8;
+        unsafe { ROM_SPIFLASH_LEGACY_DATA.read_volatile().add(24) }
+    }
+
+    /// SPI0 carries the flash din mode/num for BOTH controllers -- the SPI1
+    /// copies are meaningless for flash, which is why only SPI0 is written.
+    #[ram]
+    fn set_flash_din_mode_num(din_mode: u8, din_num: u8) {
+        SPI0::regs().din_mode().modify(|_, w| unsafe {
+            w.din0_mode().bits(din_mode);
+            w.din1_mode().bits(din_mode);
+            w.din2_mode().bits(din_mode);
+            w.din3_mode().bits(din_mode);
+            w.din4_mode().bits(din_mode);
+            w.din5_mode().bits(din_mode);
+            w.din6_mode().bits(din_mode);
+            w.din7_mode().bits(din_mode);
+            w.dins_mode().bits(din_mode)
+        });
+        SPI0::regs().din_num().modify(|_, w| unsafe {
+            w.din0_num().bits(din_num);
+            w.din1_num().bits(din_num);
+            w.din2_num().bits(din_num);
+            w.din3_num().bits(din_num);
+            w.din4_num().bits(din_num);
+            w.din5_num().bits(din_num);
+            w.din6_num().bits(din_num);
+            w.din7_num().bits(din_num);
+            w.dins_num().bits(din_num)
+        });
+    }
+
+    /// Extra dummy for quad flash. `SPI_MEM_TIMING_CALI_REG` is OPI-only here,
+    /// so the ROM read API is steered through its own global instead, and SPI1's
+    /// user dummy is set to match.
+    #[ram]
+    fn set_flash_extra_dummy(base: u8, extra: u8) {
+        let total = base.saturating_add(extra);
+        let cycles = QIO_DUMMY_CYCLELEN + total - 1;
+        // SPI1 only, as IDF does it. SPI0's cache reads do not take their dummy
+        // from `user1`, so writing it there does nothing useful and corrupts the
+        // controller the CPU is fetching over -- measured: it moved the hang
+        // EARLIER, from the divider raise to the log call before it.
+        //
+        // Both ROM indices are updated because the cache configuration is
+        // rebuilt from index 0.
+        unsafe {
+            rom_dummy_len_plus().write_volatile(total);
+            rom_dummy_len_plus().add(1).write_volatile(total);
+        }
+        // Both halves, as `mspi_timing_ll_set_quad_flash_dummy` does: the ENABLE
+        // bit in USER as well as the length in USER1. Setting only the length
+        // emits no dummy cycles at all.
+        SPI1::regs().user().modify(|_, w| w.usr_dummy().set_bit());
+        SPI1::regs()
+            .user1()
+            .modify(|_, w| unsafe { w.usr_dummy_cyclelen().bits(cycles) });
+    }
+
+    /// Read the reference window with the ROM API (it honours the global above).
+    #[ram]
+    fn tuning_read(buf: &mut [u8; TUNING_LEN]) {
+        unsafe extern "C" {
+            fn esp_rom_spiflash_read(src: u32, dst: *mut u32, len: u32) -> i32;
+        }
+        unsafe {
+            esp_rom_spiflash_read(TUNING_ADDR, buf.as_mut_ptr().cast(), TUNING_LEN as u32);
+        }
+    }
+
+    /// Sweep the candidate table and pick the middle of the longest passing run.
+    ///
+    /// Without this the S3 cannot fetch at 120 MHz at all: the clock switch lands
+    /// mid-instruction and the core hangs. IDF gates it the same way
+    /// (`MSPI_TIMING_FLASH_NEEDS_TUNING = module clock > 80` in STR mode).
+    ///
+    /// The reference is taken at the slow, known-good setting; a candidate passes
+    /// only if it reproduces those bytes exactly.
+    #[ram]
+    fn flash_tuning(reference: &[u8; TUNING_LEN], base_dummy: u8) -> (u8, u8, u8) {
+        let (mut run, mut run_start, mut best_len, mut best_start) = (0usize, 0usize, 0usize, 0usize);
+        for (i, &(din_mode, din_num, extra)) in FLASH_TUNING_CORE240M_MOD120M_STR.iter().enumerate() {
+            set_flash_din_mode_num(din_mode, din_num);
+            set_flash_extra_dummy(base_dummy, extra);
+            let mut probe = [0u8; TUNING_LEN];
+            tuning_read(&mut probe);
+            if probe == *reference {
+                if run == 0 {
+                    run_start = i;
+                }
+                run += 1;
+                if run > best_len {
+                    best_len = run;
+                    best_start = run_start;
+                }
+            } else {
+                run = 0;
+            }
+        }
+        // IDF: fewer than 3 consecutive passes means the tuning FAILED -- fall
+        // back to the vendor's known-good point for this table
+        // (`default_config_id` = 2) rather than to an arbitrary index.
+        const DEFAULT_CONFIG_ID: usize = 2;
+        let best = if best_len >= 3 {
+            FLASH_TUNING_CORE240M_MOD120M_STR[best_start + best_len / 2]
+        } else {
+            warn!("flash timing tuning failed ({best_len}/12 passed); using the default point");
+            FLASH_TUNING_CORE240M_MOD120M_STR[DEFAULT_CONFIG_ID]
+        };
+        // Put SPI0 back the way low-speed mode left it before returning. The
+        // sweep exits with the LAST candidate applied, not the best one, and the
+        // return itself runs flash-resident code -- so leaving an arbitrary delay
+        // line in place hangs on the way out.
+        set_flash_din_mode_num(0, 0);
+        set_flash_extra_dummy(base_dummy, 0);
+        best
+    }
+
     /// Set SPI0 FLASH and PSRAM module clock, din_num, din_mode and extra
     /// dummy, according to the configuration got from timing tuning
     /// function (`calculate_best_flash_tuning_config`). iF control_spi1 ==
@@ -400,15 +616,43 @@ pub(crate) mod quad_spi_impl {
     /// This function should always be called after `mspi_timing_flash_tuning`
     /// or `calculate_best_flash_tuning_config`
     #[ram]
-    fn mspi_timing_enter_high_speed_mode(control_spi1: bool, config: &PsramConfig) {
+    /// Drop both controllers to 20 MHz (core 80 / div 4) and clear the delay
+    /// line, so the tuning sweep below can change the SHARED `din_mode`/`din_num`
+    /// without breaking the instruction fetches still coming over SPI0.
+    #[ram]
+    fn mspi_timing_enter_low_speed_mode(control_spi1: bool) {
+        spi0_timing_config_set_core_clock(SpiTimingConfigCoreClock::SpiTimingConfigCoreClock80m);
+        spi0_timing_config_set_flash_clock(4);
+        if control_spi1 {
+            spi1_timing_config_set_flash_clock(4);
+        }
+        spi0_timing_config_set_psram_clock(4);
+        set_flash_din_mode_num(0, 0);
+    }
+
+    fn mspi_timing_enter_high_speed_mode(
+        control_spi1: bool,
+        config: &PsramConfig,
+        tuned: Option<((u8, u8, u8), u8)>,
+    ) {
+        // `info!` is flash-resident, so it goes before the cache is suspended.
         let core_clock: SpiTimingConfigCoreClock = mspi_core_clock(config);
         let flash_div: u32 = flash_clock_divider(config);
         let psram_div: u32 = psram_clock_divider(config);
-
         info!(
             "PSRAM core_clock {:?}, flash_div = {}, psram_div = {}",
             core_clock, flash_div, psram_div
         );
+        // Suspend the cache across the clock change. An in-flight fill otherwise
+        // straddles the old and new timing and the core never recovers; IDF does
+        // this and it is the last piece missing here.
+        unsafe extern "C" {
+            fn rom_Cache_Suspend_ICache() -> u32;
+            fn Cache_Resume_ICache(autoload: u32);
+            fn Cache_Invalidate_ICache_All();
+        }
+        let autoload = unsafe { rom_Cache_Suspend_ICache() };
+
 
         // Set SPI01 core clock
         // SPI0 and SPI1 share the register for core clock. So we only set SPI0 here.
@@ -422,9 +666,30 @@ pub(crate) mod quad_spi_impl {
         // Set PSRAM module clock
         spi0_timing_config_set_psram_clock(psram_div);
 
-        // #if SPI_TIMING_FLASH_NEEDS_TUNING || SPI_TIMING_PSRAM_NEEDS_TUNING
-        //     set_timing_tuning_regs_as_required(true);
-        // #endif
+        // Tuning registers go AFTER the clocks, exactly as IDF's
+        // `mspi_timing_enter_high_speed_mode` does: clocks, then din/dummy. It is
+        // safe in this order only because the cache is suspended -- nothing
+        // fetches from flash in between, so the intermediate "fast clock, stale
+        // delay" state is never observed.
+        if let Some(((din_mode, din_num, extra), base_dummy)) = tuned {
+            set_flash_din_mode_num(din_mode, din_num);
+            set_flash_extra_dummy(base_dummy, extra);
+            let cycles = QIO_DUMMY_CYCLELEN + base_dummy + extra - 1;
+            SPI0::regs().user().modify(|_, w| w.usr_dummy().set_bit());
+            SPI0::regs()
+                .user1()
+                .modify(|_, w| unsafe { w.usr_dummy_cyclelen().bits(cycles) });
+        }
+
+        unsafe {
+            Cache_Invalidate_ICache_All();
+            Cache_Resume_ICache(autoload);
+        }
+
+        // Flash above 80 MHz in STR mode cannot be fetched from without delay-line
+        // tuning -- the S3 hangs on the first XIP fetch after the clock change.
+        // The reference window is read at the old, known-good setting before the
+        // clock moves; anything slower than 120 MHz needs none of this.
     }
 
     #[ram]
