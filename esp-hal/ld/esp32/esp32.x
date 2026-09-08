@@ -15,6 +15,7 @@ INCLUDE "rtc_fast.x"
 INCLUDE "rtc_slow.x"
 INCLUDE "stack.x"
 INCLUDE "dram2.x"
+INCLUDE "bt_bredr.x"
 INCLUDE "metadata.x"
 INCLUDE "eh_frame.x"
 /* End of Shared sections */

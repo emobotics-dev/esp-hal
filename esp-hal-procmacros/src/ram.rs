@@ -11,6 +11,7 @@ pub fn ram(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut rtc_slow = false;
     let mut dram2_uninit = false;
     let mut dcache_reclaimed = false;
+    let mut bt_bredr_reclaimed = false;
     let mut persistent = false;
     let mut zeroed = false;
 
@@ -40,6 +41,7 @@ pub fn ram(args: TokenStream, input: TokenStream) -> TokenStream {
                                 i if i == "rtc_slow" => &mut rtc_slow,
                                 i if i == "persistent" => &mut persistent,
                                 i if i == "dcache_reclaimed" => &mut dcache_reclaimed,
+                                i if i == "bt_bredr_reclaimed" => &mut bt_bredr_reclaimed,
                                 i if i == "zeroed" => &mut zeroed,
                                 i => {
                                     return syn::Error::new(
@@ -143,13 +145,30 @@ pub fn ram(args: TokenStream, input: TokenStream) -> TokenStream {
         .into_compile_error();
     }
 
+    #[cfg(not(feature = "bt-bredr-reclaimed"))]
+    if bt_bredr_reclaimed {
+        return syn::Error::new(
+            Span::call_site(),
+            "bt_bredr_reclaimed is not available for this target",
+        )
+        .into_compile_error();
+    }
+
+    if bt_bredr_reclaimed && dcache_reclaimed {
+        return syn::Error::new(
+            Span::call_site(),
+            "bt_bredr_reclaimed and dcache_reclaimed are different regions",
+        )
+        .into_compile_error();
+    }
+
     let is_fn = matches!(item, Item::Fn(_));
     let section_name = match (
         is_fn,
         rtc_fast,
         rtc_slow,
         dram2_uninit,
-        dcache_reclaimed,
+        dcache_reclaimed || bt_bredr_reclaimed,
         persistent,
         zeroed,
     ) {
@@ -159,7 +178,11 @@ pub fn ram(args: TokenStream, input: TokenStream) -> TokenStream {
 
         (false, false, false, false, false, false, false) => Ok(".data"),
         (false, false, false, true, false, false, false) => Ok(".dram2_uninit"),
-        (false, false, false, false, true, false, false) => Ok(".dcache_reclaimed_uninit"),
+        (false, false, false, false, true, false, false) => Ok(if bt_bredr_reclaimed {
+            ".bt_bredr_uninit"
+        } else {
+            ".dcache_reclaimed_uninit"
+        }),
 
         (false, true, false, false, false, false, false) => Ok(".rtc_fast.data"),
         (false, true, false, false, false, true, false) => Ok(".rtc_fast.persistent"),
@@ -190,7 +213,7 @@ pub fn ram(args: TokenStream, input: TokenStream) -> TokenStream {
         Some("zeroable")
     } else if persistent {
         Some("persistable")
-    } else if dram2_uninit || dcache_reclaimed {
+    } else if dram2_uninit || dcache_reclaimed || bt_bredr_reclaimed {
         Some("uninit")
     } else {
         None

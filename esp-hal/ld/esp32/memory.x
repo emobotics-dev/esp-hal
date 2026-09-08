@@ -24,6 +24,38 @@ MEMORY
   dram_seg ( RW )        : ORIGIN = 0x3FFAE000 + 8K + RESERVE_DRAM, len = 192K - RESERVE_DRAM
 
   /*
+  *   BR/EDR exchange memory, reclaimed for applications that run BLE ONLY.
+  *
+  *   `RESERVE_DRAM` above keeps the whole 64 KiB at 0x3FFB0000 clear because the
+  *   BT controller blob addresses it ABSOLUTELY -- the radio block itself reads
+  *   and writes the "EM" ranges, so they cannot be relocated and cannot live in
+  *   PSRAM. But a third of that window belongs to Classic BT, which a BLE-only
+  *   application never enables:
+  *
+  *     0x3FFB2730..0x3FFB6388  15448 B  EM BR/EDR
+  *     0x3FFB6388..0x3FFB7CD8   6480 B  EM SYNC0/1/2 (SCO/eSCO voice)
+  *
+  *   Both come from esp-idf's own `SOC_MEM_BT_*` constants. The SYNC block is
+  *   not even initialised -- esp-radio's table stops at `BREDR_REAL_END`, which
+  *   equals `NO_SYNC_END` -- and esp-radio's `btdm_controller_mem_init` skips
+  *   the BR/EDR entry when Classic BT is not enabled. IDF releases the same
+  *   memory through `esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT)`.
+  *
+  *   It is a SEPARATE region, not a smaller `RESERVE_DRAM`, because it sits in
+  *   the MIDDLE of the reservation: `dram_seg` grows down from 0x3FFC0000 and
+  *   would reach the BLE EM ranges first. Backs `.bt_bredr_uninit`, which
+  *   `#[ram(unstable(bt_bredr_reclaimed))]` emits into.
+  *
+  *   ONLY valid for a BLE-only build. Enabling Classic BT while anything lives
+  *   here means the controller and that tenant share memory.
+  */
+#IF CARGO_FEATURE("__bluetooth")
+  bt_bredr_seg           : ORIGIN = 0x3FFB2730, len = 21928
+#ELSE
+  bt_bredr_seg           : ORIGIN = 0x3FFB2730, len = 0
+#ENDIF
+
+  /*
   * The following values come from the heap allocator in esp-idf: https://github.com/espressif/esp-idf/blob/ab63aaa4a24a05904da2862d627f3987ecbeafd0/components/heap/port/esp32/memory_layout.c#L137-L157
   * The segment dram2_seg after the rom data space is not mentioned in the esp32 linker scripts in esp-idf, instead the space after is used as heap space.
   * It seems not all rom data space is reserved, but only "core"/"important" ROM functions that may be called after booting from ROM.
