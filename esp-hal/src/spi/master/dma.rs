@@ -580,6 +580,16 @@ impl<'d> SpiDma<'d, Async> {
 
                 this.driver.state.waker.register(cx.waker());
                 this.driver.enable_listen(Self::DONE_EVENTS, true);
+
+                // `trans_done` and the interrupt enable share one register here,
+                // so the read-modify-write above can drop a completion that lands
+                // inside it — no interrupt follows and this waiter never wakes.
+                #[cfg(any(esp32, esp32s2))]
+                if !this.driver.busy() {
+                    this.driver.clear_interrupts(Self::DONE_EVENTS);
+                    return Poll::Ready(());
+                }
+
                 Poll::Pending
             }
         }
