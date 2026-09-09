@@ -369,6 +369,10 @@ pub(crate) fn ble_init(config: &Config) -> PhyInitGuard<'static> {
         #[cfg(feature = "coex")]
         coex_enable();
 
+        // BLE-ONLY, and esp-hal's `bt_bredr_seg` depends on it: that region hands
+        // the controller's BR/EDR exchange memory to the application. Anyone
+        // changing this mode must first remove that region, or the controller
+        // and the application will share memory.
         btdm_controller_enable(esp_bt_mode_t_ESP_BT_MODE_BLE);
 
         API_vhci_host_register_callback(&VHCI_HOST_CALLBACK);

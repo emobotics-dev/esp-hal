@@ -46,6 +46,9 @@ rtc-fast = []
 ## Indicates the target device has a data cache that when not used, is available
 ## in a memory section *separate* from DRAM.
 dcache-reclaimed = []
+## Enable `#[ram(unstable(bt_bredr_reclaimed))]` — the Classic-BT exchange
+## memory a BLE-only application can use. esp32 only; see `bt_bredr_seg`.
+bt-bredr-reclaimed = []
 
 #! ### Low-power Core Feature Flags
 ## Indicate that the SoC contains an LP core.

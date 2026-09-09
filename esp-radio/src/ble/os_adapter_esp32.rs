@@ -429,6 +429,19 @@ pub(crate) fn btdm_controller_mem_init() {
 
     #[allow(clippy::needless_range_loop)] // the alternative looks worse
     for i in 1..btdm_dram_regions {
+        // SKIP the Classic-BT entry. This controller is enabled BLE-only
+        // (`btdm_controller_enable(ESP_BT_MODE_BLE)`, `bt_max_acl_conn: 0`), so
+        // its BR/EDR exchange memory is never used -- and zeroing it is not
+        // merely wasted work: esp-hal's `bt_bredr_seg` hands those 21928 bytes
+        // to the application, which this would silently wipe at radio init.
+        // IDF does the same thing through
+        // `esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT)`.
+        //
+        // The `mode` field has always distinguished these entries; the loop
+        // simply ignored it, zeroing everything that was not IDLE.
+        if BTDM_DRAM_AVAILABLE_REGION[i].mode == esp_bt_mode_t_ESP_BT_MODE_CLASSIC_BT {
+            continue;
+        }
         if BTDM_DRAM_AVAILABLE_REGION[i].mode != esp_bt_mode_t_ESP_BT_MODE_IDLE {
             unsafe {
                 core::ptr::write_bytes(
