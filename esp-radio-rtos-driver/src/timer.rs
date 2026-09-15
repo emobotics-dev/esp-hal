@@ -356,12 +356,15 @@ mod implementation {
                             unsafe {
                                 // It's okay to drop the thread pointer, the timer queue cannot be
                                 // stopped.
+                                // Pinned to core 0, as ESP-IDF pins its timer task: the
+                                // blob's timer callbacks must not run on one core while the
+                                // Wi-Fi task and its interrupt run on the other.
                                 crate::task_create(
                                     "timer",
                                     timer_task,
                                     queue_ptr.as_ptr().cast(),
                                     task_priority,
-                                    None,
+                                    Some(0),
                                     8192,
                                 );
                             }
