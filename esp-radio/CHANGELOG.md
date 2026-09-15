@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ESP32-S31: `wifi_clock_enable`/`wifi_clock_disable` go through `esp-phy`'s shared modem clock reference counts instead of writing the clock gates directly, which stalled the CPU mid-join when the PHY had already dropped its hold on the same clocks. The baseband reset is now a pulse, and the Wi-Fi power clock is left to `esp-hal`.
 
 ### Removed
 

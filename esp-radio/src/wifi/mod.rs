@@ -1170,6 +1170,11 @@ pub(crate) fn wifi_init(_wifi: crate::hal::peripherals::WIFI<'_>) -> Result<(), 
         esp_wifi_result!(coex_init())?;
 
         esp_wifi_result!(esp_wifi_init_internal(addr_of!(internal::G_CONFIG)))?;
+        // ESP-IDF's `modem_clock_configure_wifi_status(true)`: from here on the
+        // blob may touch the baseband between `wifi_clock_disable` and the next
+        // enable, so its clocks must stay ungated until deinit.
+        #[cfg(esp32s31)]
+        esp_phy::modem_clock::set_wifi_initialized(true);
         esp_wifi_result!(esp_wifi_set_mode(wifi_mode_t_WIFI_MODE_NULL))?;
 
         esp_wifi_result!(esp_supplicant_init())?;
@@ -1237,6 +1242,8 @@ fn wifi_deinit() -> Result<(), WifiError> {
     }
 
     esp_wifi_result!(unsafe { esp_wifi_deinit_internal() })?;
+    #[cfg(esp32s31)]
+    esp_phy::modem_clock::set_wifi_initialized(false);
     esp_wifi_result!(unsafe { esp_supplicant_deinit() })?;
     Ok(())
 }
