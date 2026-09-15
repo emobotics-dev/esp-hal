@@ -2654,7 +2654,11 @@ impl<'d> WifiController<'d> {
 
         controller.set_country_info(&config.country_info)?;
         // Set a sane default power saving mode. The blob default is not the best for bandwidth.
-        controller.set_power_saving(PowerSaveMode::default())?;
+        // Power saving is a station setting: an access point alone follows ESP-IDF's softAP
+        // bring-up, which never calls `esp_wifi_set_ps`.
+        if !matches!(config.initial_config, Config::AccessPoint(_)) {
+            controller.set_power_saving(PowerSaveMode::default())?;
+        }
 
         controller.set_config(&config.initial_config)?;
 
