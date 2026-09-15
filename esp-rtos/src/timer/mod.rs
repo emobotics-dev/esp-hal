@@ -301,6 +301,9 @@ extern "C" fn timer_tick_handler() {
             if active_cores.contains(cpu)
                 && now >= time_driver.timer_queue.time_slice_target[cpu as usize]
             {
+                // Clear the expired target, or `rearm` below arms the alarm in the past and this
+                // interrupt keeps itself pending, starving the context switch it asked for.
+                time_driver.set_time_slice(cpu, now, false);
                 task::trigger_scheduler(RunSchedulerOn::RunOnCore(cpu));
             }
         }

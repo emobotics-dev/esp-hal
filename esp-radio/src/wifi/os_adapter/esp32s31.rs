@@ -6,41 +6,17 @@ use crate::{
 
 static ISR_INTERRUPT_1: Handler = Handler::new();
 
-/// Enable the CPU interrupt lines in `mask`.
+/// Deliberately does nothing, as on the C6 and on upstream's ESP32-S31.
 ///
-/// The C6 and friends have one `INTPRI.cpu_int_enable` bitmask register; the
-/// ESP32-S31's controller is a CLIC, which enables each line through its own
-/// `int_ie` register. The blobs still hand us a mask, so walk its set bits.
-pub(crate) fn chip_ints_on(mask: u32) {
-    let clic = regs!(CLIC);
-    for cpu_int in BitIter(mask) {
-        clic.int_ie(cpu_int as usize)
-            .write(|w| w.int_ie().set_bit());
-    }
-}
+/// The blob's mask names ESP-IDF's CPU interrupt line (bit 1, which ESP-IDF
+/// offsets to CLIC line 17). esp-hal routes the Wi-Fi sources elsewhere: to the
+/// shared priority-1 line, which also carries the esp-rtos tick, the UART and
+/// every other priority-1 peripheral. Writing the mask to `int_ie` either masks
+/// an unused slot or, pointed at the real line, stops the scheduler.
+pub(crate) fn chip_ints_on(_mask: u32) {}
 
-pub(crate) fn chip_ints_off(mask: u32) {
-    let clic = regs!(CLIC);
-    for cpu_int in BitIter(mask) {
-        clic.int_ie(cpu_int as usize)
-            .write(|w| w.int_ie().clear_bit());
-    }
-}
-
-struct BitIter(u32);
-
-impl Iterator for BitIter {
-    type Item = u32;
-
-    fn next(&mut self) -> Option<u32> {
-        if self.0 == 0 {
-            return None;
-        }
-        let bit = self.0.trailing_zeros();
-        self.0 &= self.0 - 1;
-        Some(bit)
-    }
-}
+/// See [`chip_ints_on`].
+pub(crate) fn chip_ints_off(_mask: u32) {}
 
 pub(crate) unsafe extern "C" fn set_intr(
     _cpu_no: i32,
@@ -92,9 +68,17 @@ pub unsafe extern "C" fn set_isr(n: i32, f: *mut c_void, arg: *mut c_void) {
         _ => panic!("set_isr - unsupported interrupt number {}", n),
     }
 
+    // A null handler is how the blob unregisters (`ic_clear_interrupt_handler`
+    // on stop and mode switch). Left enabled, a pending level-triggered source
+    // would retrigger forever with nothing behind it to clear it.
     unsafe {
-        WIFI::steal().enable_mac_interrupt(Priority::Priority1);
-        WIFI::steal().enable_pwr_interrupt(Priority::Priority1);
+        if f.is_null() {
+            WIFI::steal().disable_mac_interrupt_on_all_cores();
+            WIFI::steal().disable_pwr_interrupt_on_all_cores();
+        } else {
+            WIFI::steal().enable_mac_interrupt(Priority::Priority1);
+            WIFI::steal().enable_pwr_interrupt(Priority::Priority1);
+        }
     }
 }
 
