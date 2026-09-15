@@ -114,6 +114,9 @@ pub(crate) mod sys {
 }
 
 mod common_adapter;
+#[cfg(esp32s31)]
+#[doc(hidden)]
+pub mod modem_clock;
 mod phy_clocks;
 mod phy_init_data;
 

@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ESP32-S31: the modem clocks shared with `esp-radio` are reference-counted, and the Wi-Fi MAC and baseband clocks stay ungated while Wi-Fi is initialized, as in ESP-IDF. Disabling the PHY used to gate them unconditionally, and the Wi-Fi driver's next baseband read stalled the CPU.
 
 ### Removed
 
