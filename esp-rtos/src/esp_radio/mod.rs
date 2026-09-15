@@ -129,8 +129,11 @@ impl esp_radio_rtos_driver::SchedulerImplementation for Scheduler {
 }
 
 impl WaitQueue {
+    /// # Safety
+    ///
+    /// Call only while holding the scheduler lock, and let the reference end before releasing it:
+    /// the lock is what makes this `&mut` unique across cores.
     unsafe fn from_ptr<'a>(ptr: WaitQueuePtr) -> &'a mut Self {
-        // This is fine because the methods will both hold a scheduler lock.
         unsafe { ptr.cast::<Self>().as_mut() }
     }
 }
@@ -147,20 +150,22 @@ impl WaitQueueImplementation for WaitQueue {
     }
 
     unsafe fn wait_until(queue: WaitQueuePtr, deadline_instant: Option<u64>) {
-        let wait_queue = unsafe { Self::from_ptr(queue) };
+        let deadline = Instant::EPOCH
+            + deadline_instant
+                .map(Duration::from_micros)
+                .unwrap_or(Duration::MAX);
 
-        wait_queue.wait_with_deadline(
-            Instant::EPOCH
-                + deadline_instant
-                    .map(Duration::from_micros)
-                    .unwrap_or(Duration::MAX),
-        )
+        crate::SCHEDULER.with(|scheduler| {
+            let wait_queue = unsafe { Self::from_ptr(queue) };
+            wait_queue.wait_with_deadline(scheduler, deadline)
+        })
     }
 
     unsafe fn notify(queue: WaitQueuePtr) {
-        let wait_queue = unsafe { Self::from_ptr(queue) };
-
-        wait_queue.notify()
+        crate::SCHEDULER.with(|scheduler| {
+            let wait_queue = unsafe { Self::from_ptr(queue) };
+            wait_queue.notify(scheduler)
+        })
     }
 
     unsafe fn notify_from_isr(queue: WaitQueuePtr, _higher_prio_task_waken: Option<&mut bool>) {
