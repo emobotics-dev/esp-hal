@@ -2300,6 +2300,25 @@ pub struct CountryInfo {
     /// Operating class.
     #[builder_lite(unstable)]
     operating_class: OperatingClass,
+
+    /// First channel the country permits.
+    ///
+    /// Defaults to 1. With [`WIFI_COUNTRY_POLICY_MANUAL`], which this type
+    /// always sets, the driver takes this range verbatim: the country code
+    /// alone does not widen it.
+    ///
+    /// [`WIFI_COUNTRY_POLICY_MANUAL`]: https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/wifi.html#wi-fi-country-code
+    #[builder_lite(unstable)]
+    first_channel: u8,
+
+    /// How many channels from [`Self::first_channel`] the country permits.
+    ///
+    /// Defaults to 13, which with a first channel of 1 is the 2.4 GHz range
+    /// every region but Japan allows. Japan's fourteenth channel needs `14`
+    /// here *and* a `JP` country code; it is 802.11b-only, and transmitting on
+    /// it elsewhere is outside the band plan.
+    #[builder_lite(unstable)]
+    channel_count: u8,
 }
 
 impl From<[u8; 2]> for CountryInfo {
@@ -2307,6 +2326,8 @@ impl From<[u8; 2]> for CountryInfo {
         Self {
             country,
             operating_class: OperatingClass::default(),
+            first_channel: 1,
+            channel_count: 13,
         }
     }
 }
@@ -2319,9 +2340,8 @@ impl CountryInfo {
                 self.country[1],
                 self.operating_class.into_code(),
             ],
-            // TODO: these may be valid defaults, but they should be configurable.
-            schan: 1,
-            nchan: 13,
+            schan: self.first_channel,
+            nchan: self.channel_count,
             // This field is output-only: esp_wifi_set_country ignores it. The actual TX power
             // is controlled exclusively via esp_wifi_set_max_tx_power after WiFi start.
             // See: https://github.com/espressif/esp-idf/blob/20f5e18/components/esp_wifi/include/esp_wifi_types.h#L46
@@ -2341,6 +2361,8 @@ impl CountryInfo {
         Some(Self {
             country: [cc[0], cc[1]],
             operating_class,
+            first_channel: info.schan,
+            channel_count: info.nchan,
         })
     }
 }
