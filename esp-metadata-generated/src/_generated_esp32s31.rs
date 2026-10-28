@@ -376,6 +376,12 @@ macro_rules! property {
     ("rsa.memory_size_bytes", str) => {
         stringify!(512)
     };
+    ("assist_debug.has_sp_monitor") => {
+        true
+    };
+    ("assist_debug.has_region_monitor") => {
+        true
+    };
     ("dma.mem2mem_requires_peripheral") => {
         false
     };
