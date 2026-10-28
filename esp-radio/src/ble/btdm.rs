@@ -24,6 +24,15 @@ pub(crate) mod ble_os_adapter_chip_specific;
 
 static PACKET_SENT: AtomicBool = AtomicBool::new(true);
 
+/// Woken by `notify_host_send_available`: the controller can take a packet,
+/// which is also when the one before it has gone out.
+static SEND_WAKER: crate::asynch::AtomicWaker = crate::asynch::AtomicWaker::new();
+
+/// One async sender at a time: `HCI_OUT_COLLECTOR` is shared, and a send now
+/// awaits between collecting and resetting it. `ExternalController` does not
+/// serialise its writes. Also keeps [`SEND_WAKER`] to a single waiter.
+static SEND_LOCK: embassy_sync::mutex::Mutex<RawMutex, ()> = embassy_sync::mutex::Mutex::new(());
+
 #[repr(C)]
 struct VhciHostCallbacks {
     // callback used to notify that the host can
@@ -67,6 +76,7 @@ extern "C" fn notify_host_send_available() {
     trace!("notify_host_send_available");
 
     PACKET_SENT.store(true, Ordering::Relaxed);
+    SEND_WAKER.wake();
 }
 
 extern "C" fn notify_host_recv(data: *mut u8, len: u16) -> i32 {
@@ -399,6 +409,48 @@ pub(crate) fn ble_deinit() {
 }
 /// Sends HCI data to the BLE controller.
 #[instability::unstable]
+/// Wait, without spinning, until `ready` holds. Registers before checking, so a
+/// callback between the check and the return still wakes the task.
+async fn wait_send(ready: impl Fn() -> bool) {
+    core::future::poll_fn(|cx| {
+        SEND_WAKER.register(cx.waker());
+        if ready() {
+            core::task::Poll::Ready(())
+        } else {
+            core::task::Poll::Pending
+        }
+    })
+    .await
+}
+
+/// [`send_hci`] for async callers: waits for the controller instead of spinning
+/// in the calling thread, which starved every lower-priority thread on its core.
+pub(crate) async fn send_hci_async(data: &[u8]) {
+    let _one_sender = SEND_LOCK.lock().await;
+    let hci_out = unsafe { (*addr_of_mut!(HCI_OUT_COLLECTOR)).assume_init_mut() };
+    hci_out.push(data);
+    if !hci_out.is_ready() {
+        return;
+    }
+    // SAFETY: a controller query with no arguments.
+    wait_send(|| unsafe { API_vhci_host_check_send_available() }).await;
+    let packet = hci_out.packet();
+    PACKET_SENT.store(false, Ordering::Relaxed);
+    #[cfg(all(esp32, feature = "coex"))]
+    ble_os_adapter_chip_specific::async_wakeup_request(
+        ble_os_adapter_chip_specific::BTDM_ASYNC_WAKEUP_REQ_HCI,
+    );
+    // SAFETY: `packet` stays untouched until PACKET_SENT says it has gone out.
+    unsafe { API_vhci_host_send_packet(packet.as_ptr(), packet.len() as u16) };
+    #[cfg(all(esp32, feature = "coex"))]
+    ble_os_adapter_chip_specific::async_wakeup_request_end(
+        ble_os_adapter_chip_specific::BTDM_ASYNC_WAKEUP_REQ_HCI,
+    );
+    super::dump_packet_info(packet);
+    wait_send(|| PACKET_SENT.load(Ordering::Relaxed)).await;
+    hci_out.reset();
+}
+
 pub fn send_hci(data: &[u8]) {
     let hci_out = unsafe { (*addr_of_mut!(HCI_OUT_COLLECTOR)).assume_init_mut() };
     hci_out.push(data);

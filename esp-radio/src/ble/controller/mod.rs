@@ -15,7 +15,15 @@ use esp_phy::PhyInitGuard;
 use crate::{
     RadioRefGuard,
     asynch::AtomicWaker,
-    ble::{Config, InvalidConfigError, have_hci_read_data, read_hci, read_next, send_hci},
+    ble::{
+        Config,
+        InvalidConfigError,
+        have_hci_read_data,
+        read_hci,
+        read_next,
+        send_hci,
+        send_hci_async,
+    },
 };
 
 #[derive(Display, Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -192,7 +200,7 @@ impl embedded_io_async_06::Read for BleConnector<'_> {
 
 impl embedded_io_async_06::Write for BleConnector<'_> {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, BleConnectorError> {
-        send_hci(buf);
+        send_hci_async(buf).await;
         Ok(buf.len())
     }
 
@@ -210,7 +218,7 @@ impl embedded_io_async_07::Read for BleConnector<'_> {
 
 impl embedded_io_async_07::Write for BleConnector<'_> {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, BleConnectorError> {
-        send_hci(buf);
+        send_hci_async(buf).await;
         Ok(buf.len())
     }
 
@@ -261,7 +269,7 @@ impl embedded_io_07::ErrorType for HciWriter {
 
 impl embedded_io_async_07::Write for HciWriter {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        send_hci(buf);
+        send_hci_async(buf).await;
         Ok(buf.len())
     }
 
