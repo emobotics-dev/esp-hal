@@ -156,6 +156,26 @@ pub unsafe fn arm_current(bottom: usize, top: usize) {
     }
 }
 
+/// Stop every core's monitor and drop its latch, for a reset in progress.
+///
+/// Resetting a core moves its SP out of the bounds it was guarded with, and
+/// the interrupt that raises is shared: on the core requesting the reset it
+/// would preempt the reset itself.
+pub fn disarm_all() {
+    for cpu in Cpu::all() {
+        let m = monitor(cpu);
+        // SAFETY: the blocks of armed cores were filled by `arm_current`; a
+        // core's own context switch reads `armed` before touching the rest.
+        unsafe {
+            if (*m).armed != 0 {
+                (*m).armed = 0;
+                (*m).montr_ena.write_volatile((*m).montr_stopped);
+                (*m).intr_clr.write_volatile((*m).clear_bits);
+            }
+        }
+    }
+}
+
 /// Stage `bottom..top` as the stack the current core's next context restore
 /// switches to. A no-op until [`arm_current`] has run on this core.
 pub fn stage(bottom: usize, top: usize) {
