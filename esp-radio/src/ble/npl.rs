@@ -1513,6 +1513,12 @@ unsafe extern "C" fn ble_hs_rx_data(om: *const OsMbuf, arg: *const c_void) -> i3
 
 /// Sends HCI data to the Bluetooth controller.
 #[instability::unstable]
+/// [`send_hci`] for async callers. This controller queues the packet without
+/// waiting, so there is nothing to await.
+pub(crate) async fn send_hci_async(data: &[u8]) {
+    send_hci(data);
+}
+
 pub fn send_hci(data: &[u8]) {
     let hci_out = unsafe { (*addr_of_mut!(HCI_OUT_COLLECTOR)).assume_init_mut() };
     hci_out.push(data);
