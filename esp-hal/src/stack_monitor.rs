@@ -84,7 +84,8 @@ const _: () = assert!(core::mem::offset_of!(Monitor, next_max) == Monitor::NEXT_
 
 /// Every core's [`Monitor`], indexed by `mhartid`.
 #[unsafe(no_mangle)]
-pub static mut ESP_HAL_STACK_MONITOR: [Monitor; Cpu::COUNT] = [const { Monitor::new() }; Cpu::COUNT];
+pub static mut ESP_HAL_STACK_MONITOR: [Monitor; Cpu::COUNT] =
+    [const { Monitor::new() }; Cpu::COUNT];
 
 #[repr(C, align(16))]
 struct EmergencyStack([u8; EMERGENCY_STACK]);
@@ -114,12 +115,26 @@ pub unsafe fn arm_current(bottom: usize, top: usize) {
     let (min, max) = bounds(bottom, top);
     // Every mask from the PAC's own fields: the bits differ between chips
     // (0 and 1 on the C6, 8 and 9 on the S31).
-    let running = regs.montr_ena().modify(|_, w| w.sp_spill_min_ena().set_bit().sp_spill_max_ena().set_bit());
-    let stopped = regs.montr_ena().modify(|_, w| w.sp_spill_min_ena().clear_bit().sp_spill_max_ena().clear_bit());
+    let running = regs
+        .montr_ena()
+        .modify(|_, w| w.sp_spill_min_ena().set_bit().sp_spill_max_ena().set_bit());
+    let stopped = regs.montr_ena().modify(|_, w| {
+        w.sp_spill_min_ena()
+            .clear_bit()
+            .sp_spill_max_ena()
+            .clear_bit()
+    });
     regs.sp_min().write(|w| unsafe { w.sp_min().bits(min) });
     regs.sp_max().write(|w| unsafe { w.sp_max().bits(max) });
-    let clear_bits = regs.intr_clr().write(|w| w.sp_spill_min_clr().set_bit().sp_spill_max_clr().set_bit());
-    regs.intr_ena().modify(|_, w| w.sp_spill_min_intr_ena().set_bit().sp_spill_max_intr_ena().set_bit());
+    let clear_bits = regs
+        .intr_clr()
+        .write(|w| w.sp_spill_min_clr().set_bit().sp_spill_max_clr().set_bit());
+    regs.intr_ena().modify(|_, w| {
+        w.sp_spill_min_intr_ena()
+            .set_bit()
+            .sp_spill_max_intr_ena()
+            .set_bit()
+    });
     unsafe {
         (*m).montr_ena = regs.montr_ena().as_ptr();
         (*m).montr_stopped = stopped;
@@ -158,16 +173,26 @@ pub fn stage(bottom: usize, top: usize) {
 extern "C" fn on_spill() {
     let cpu = Cpu::current();
     let regs = ASSIST_DEBUG::regs().cpu(cpu as usize);
-    let m = monitor(cpu);
-    // Stop first: the report runs below the bound the interrupt fired on.
-    unsafe {
-        (*m).montr_ena.write_volatile((*m).montr_stopped);
-        (*m).armed = 0;
+    let raw = regs.intr_raw().read();
+    // One interrupt source serves every core's monitor, and each core takes it.
+    // A spill on another core is that core's to report: reporting it here would
+    // name the wrong core and stack, and two cores panicking at once is not loud.
+    if !raw.sp_spill_min_raw().bit() && !raw.sp_spill_max_raw().bit() {
+        return;
     }
+    let m = monitor(cpu);
     let pc = regs.sp_pc().read().bits();
     let min = regs.sp_min().read().bits();
     let max = regs.sp_max().read().bits();
-    let below = regs.intr_raw().read().sp_spill_min_raw().bit();
+    let below = raw.sp_spill_min_raw().bit();
+    // Stop first: the report runs below the bound the interrupt fired on. Then
+    // drop the latch, or the shared line stays raised and holds every other
+    // core in this handler for as long as the report takes.
+    unsafe {
+        (*m).montr_ena.write_volatile((*m).montr_stopped);
+        (*m).armed = 0;
+        (*m).intr_clr.write_volatile((*m).clear_bits);
+    }
     let sp: usize;
     unsafe { core::arch::asm!("mv {0}, sp", out(reg) sp) };
     // SAFETY: this core's emergency stack, used once: `overflowed` never returns.
@@ -192,7 +217,11 @@ extern "C" fn overflowed(pc: u32, sp: usize, min: u32, max: u32, below: u32) -> 
     panic!(
         "[{:?}] Stack overflow: SP {} its stack's bounds [0x{:08x}, 0x{:08x}] at PC 0x{:08x} (handler SP 0x{:08x})",
         Cpu::current(),
-        if below != 0 { "fell below" } else { "rose above" },
+        if below != 0 {
+            "fell below"
+        } else {
+            "rose above"
+        },
         min,
         max,
         pc,
