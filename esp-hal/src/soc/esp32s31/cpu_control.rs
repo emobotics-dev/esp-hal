@@ -62,6 +62,16 @@ pub(crate) fn pre_system_reset() {
 
     // Prevent ROM from jumping to an entry point from the previous image.
     crate::rom::ets_set_appcpu_boot_addr(0);
+
+    // The stall code lives in the PMU, which a system reset leaves alone, so a
+    // core still stalled here stays stalled through the reboot. That is what
+    // the boot path expects of core 1, which `start_app_core` unparks; it is
+    // fatal for core 0, which nothing would ever start. Called from core 1, so
+    // release core 0 last, as IDF's `esp_restart_noos_inner` does: it is in
+    // reset, and the system reset follows at once.
+    if other_core == Cpu::ProCpu {
+        unsafe { internal_park_core(Cpu::ProCpu, false) };
+    }
 }
 
 /// Releases core 1 from reset after a CPU-domain power-down wake.
