@@ -14,6 +14,7 @@ pub use xtensa_lx;
 
 pub mod exception;
 pub mod interrupt;
+pub mod stack_monitor;
 
 #[doc(hidden)]
 #[unsafe(no_mangle)]

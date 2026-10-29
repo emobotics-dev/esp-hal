@@ -167,22 +167,17 @@ global_asm!(
 
     .endm
 
+    // Levels 2 and up; level 1 restores in `__default_naked_exception`, where
+    // a task switch loads the next task's SP.
     .macro RESTORE_CONTEXT level:req
 
     // Restore context and return
     call0   restore_context
 
-    .ifc \\level,1
-    l32i    a0, sp, +XT_STK_PS        // retrieve interruptee's PS
-    wsr     a0, PS
-    l32i    a0, sp, +XT_STK_PC        // retrieve interruptee's PC
-    wsr     a0, EPC\\level
-    .else
     l32i    a0, sp, +XT_STK_PS        // retrieve interruptee's PS
     wsr     a0, EPS\\level
     l32i    a0, sp, +XT_STK_PC        // retrieve interruptee's PC
     wsr     a0, EPC\\level
-    .endif
 
     l32i    a0, sp, +XT_STK_A0        // retrieve interruptee's A0
     l32i    sp, sp, +XT_STK_A1        // remove exception frame
@@ -384,116 +379,122 @@ save_context:
 .Lsave_context_end:
     .size .Lsave_context_start, .Lsave_context_end
 
+    // Restores every register but PC, PS, A0 and A1 from the frame at `base`,
+    // using A3 as scratch. Expanded where the frame is not addressed by SP.
+    .macro RESTORE_FRAME base
+    l32i    a3,  \\base, +XT_STK_SAR
+    wsr     a3,  SAR
+    ",
+    #[cfg(XCHAL_HAVE_LOOPS)]
+    "
+    // Loop Option
+    l32i    a3,  \\base, +XT_STK_LBEG
+    wsr     a3,  LBEG
+    l32i    a3,  \\base, +XT_STK_LEND
+    wsr     a3,  LEND
+    l32i    a3,  \\base, +XT_STK_LCOUNT
+    wsr     a3,  LCOUNT
+    ",
+    #[cfg(XCHAL_HAVE_THREADPTR)]
+    "
+    // Thread Pointer Option
+    l32i    a3, \\base, +XT_STK_THREADPTR
+    wur     a3, threadptr
+    ",
+    #[cfg(XCHAL_HAVE_S32C1I)]
+    "
+    // Conditional Store Option
+    l32i    a3, \\base, +XT_STK_SCOMPARE1
+    wsr     a3, scompare1
+    ",
+    #[cfg(XCHAL_HAVE_BOOLEANS)]
+    "
+    // Boolean Option
+    l32i    a3, \\base, +XT_STK_BR
+    wsr     a3, br
+    ",
+    #[cfg(XCHAL_HAVE_MAC16)]
+    "
+    // MAC16 Option
+    l32i    a3, \\base, +XT_STK_ACCLO
+    wsr     a3, acclo
+    l32i    a3, \\base, +XT_STK_ACCHI
+    wsr     a3, acchi
+    l32i    a3, \\base, +XT_STK_M0
+    wsr     a3, m0
+    l32i    a3, \\base, +XT_STK_M1
+    wsr     a3, m1
+    l32i    a3, \\base, +XT_STK_M2
+    wsr     a3, m2
+    l32i    a3, \\base, +XT_STK_M3
+    wsr     a3, m3
+    ",
+    #[cfg(all(feature = "float-save-restore", XCHAL_HAVE_DFP_ACCEL))]
+    "
+    // Double Precision Accelerator Option
+    l32i    a3, \\base, +XT_STK_F64R_LO_CPENABLE
+    wur     a3, f64r_lo
+    l32i    a3, \\base, +XT_STK_F64R_HI
+    wur     a3, f64r_hi
+    l32i    a3, \\base, +XT_STK_F64S
+    wur     a3, f64s
+    ",
+    #[cfg(all(feature = "float-save-restore", XCHAL_HAVE_FP))]
+    "
+    // Coprocessor Option
+    l32i    a3, \\base, +XT_STK_FCR
+    wur     a3, fcr
+    l32i    a3, \\base, +XT_STK_FSR
+    wur     a3, fsr
+    lsi     f0, \\base, +XT_STK_F0
+    lsi     f1, \\base, +XT_STK_F1
+    lsi     f2, \\base, +XT_STK_F2
+    lsi     f3, \\base, +XT_STK_F3
+    lsi     f4, \\base, +XT_STK_F4
+    lsi     f5, \\base, +XT_STK_F5
+    lsi     f6, \\base, +XT_STK_F6
+    lsi     f7, \\base, +XT_STK_F7
+    lsi     f8, \\base, +XT_STK_F8
+    lsi     f9, \\base, +XT_STK_F9
+    lsi     f10, \\base, +XT_STK_F10
+    lsi     f11, \\base, +XT_STK_F11
+    lsi     f12, \\base, +XT_STK_F12
+    lsi     f13, \\base, +XT_STK_F13
+    lsi     f14, \\base, +XT_STK_F14
+    lsi     f15, \\base, +XT_STK_F15
+    ",
+    #[cfg(all(XCHAL_HAVE_CP, not(feature = "float-save-restore")))]
+    "
+    /* Restore coprocessor state after ISR */
+    l32i    a3, \\base, +XT_STK_F64R_LO_CPENABLE
+    wsr     a3,  CPENABLE
+    rsync
+    ",
+    "
+    // general registers
+    l32i    a2,  \\base, +XT_STK_A2
+    l32i    a3,  \\base, +XT_STK_A3
+    l32i    a4,  \\base, +XT_STK_A4
+    l32i    a5,  \\base, +XT_STK_A5
+    l32i    a6,  \\base, +XT_STK_A6
+    l32i    a7,  \\base, +XT_STK_A7
+    l32i    a8,  \\base, +XT_STK_A8
+    l32i    a9,  \\base, +XT_STK_A9
+    l32i    a10, \\base, +XT_STK_A10
+    l32i    a11, \\base, +XT_STK_A11
+    l32i    a12, \\base, +XT_STK_A12
+    l32i    a13, \\base, +XT_STK_A13
+    l32i    a14, \\base, +XT_STK_A14
+    l32i    a15, \\base, +XT_STK_A15
+    .endm
+
     .section .rwtext,\"ax\",@progbits
     .global restore_context
     .p2align 2
     .type restore_context,@function
 restore_context:
 .Lrestore_context_start:
-    l32i    a3,  sp, +XT_STK_SAR
-    wsr     a3,  SAR
-    ",
-    #[cfg(XCHAL_HAVE_LOOPS)]
-    "
-    // Loop Option
-    l32i    a3,  sp, +XT_STK_LBEG
-    wsr     a3,  LBEG
-    l32i    a3,  sp, +XT_STK_LEND
-    wsr     a3,  LEND
-    l32i    a3,  sp, +XT_STK_LCOUNT
-    wsr     a3,  LCOUNT
-    ",
-    #[cfg(XCHAL_HAVE_THREADPTR)]
-    "
-    // Thread Pointer Option
-    l32i    a3, sp, +XT_STK_THREADPTR
-    wur     a3, threadptr
-    ",
-    #[cfg(XCHAL_HAVE_S32C1I)]
-    "
-    // Conditional Store Option
-    l32i    a3, sp, +XT_STK_SCOMPARE1
-    wsr     a3, scompare1
-    ",
-    #[cfg(XCHAL_HAVE_BOOLEANS)]
-    "
-    // Boolean Option
-    l32i    a3, sp, +XT_STK_BR
-    wsr     a3, br
-    ",
-    #[cfg(XCHAL_HAVE_MAC16)]
-    "
-    // MAC16 Option
-    l32i    a3, sp, +XT_STK_ACCLO
-    wsr     a3, acclo
-    l32i    a3, sp, +XT_STK_ACCHI
-    wsr     a3, acchi
-    l32i    a3, sp, +XT_STK_M0
-    wsr     a3, m0
-    l32i    a3, sp, +XT_STK_M1
-    wsr     a3, m1
-    l32i    a3, sp, +XT_STK_M2
-    wsr     a3, m2
-    l32i    a3, sp, +XT_STK_M3
-    wsr     a3, m3
-    ",
-    #[cfg(all(feature = "float-save-restore", XCHAL_HAVE_DFP_ACCEL))]
-    "
-    // Double Precision Accelerator Option
-    l32i    a3, sp, +XT_STK_F64R_LO_CPENABLE
-    wur     a3, f64r_lo
-    l32i    a3, sp, +XT_STK_F64R_HI
-    wur     a3, f64r_hi
-    l32i    a3, sp, +XT_STK_F64S
-    wur     a3, f64s
-    ",
-    #[cfg(all(feature = "float-save-restore", XCHAL_HAVE_FP))]
-    "
-    // Coprocessor Option
-    l32i    a3, sp, +XT_STK_FCR
-    wur     a3, fcr
-    l32i    a3, sp, +XT_STK_FSR
-    wur     a3, fsr
-    lsi     f0, sp, +XT_STK_F0
-    lsi     f1, sp, +XT_STK_F1
-    lsi     f2, sp, +XT_STK_F2
-    lsi     f3, sp, +XT_STK_F3
-    lsi     f4, sp, +XT_STK_F4
-    lsi     f5, sp, +XT_STK_F5
-    lsi     f6, sp, +XT_STK_F6
-    lsi     f7, sp, +XT_STK_F7
-    lsi     f8, sp, +XT_STK_F8
-    lsi     f9, sp, +XT_STK_F9
-    lsi     f10, sp, +XT_STK_F10
-    lsi     f11, sp, +XT_STK_F11
-    lsi     f12, sp, +XT_STK_F12
-    lsi     f13, sp, +XT_STK_F13
-    lsi     f14, sp, +XT_STK_F14
-    lsi     f15, sp, +XT_STK_F15
-    ",
-    #[cfg(all(XCHAL_HAVE_CP, not(feature = "float-save-restore")))]
-    "
-    /* Restore coprocessor state after ISR */
-    l32i    a3, sp, +XT_STK_F64R_LO_CPENABLE
-    wsr     a3,  CPENABLE
-    rsync
-    ",
-    "
-    // general registers
-    l32i    a2,  sp, +XT_STK_A2
-    l32i    a3,  sp, +XT_STK_A3
-    l32i    a4,  sp, +XT_STK_A4
-    l32i    a5,  sp, +XT_STK_A5
-    l32i    a6,  sp, +XT_STK_A6
-    l32i    a7,  sp, +XT_STK_A7
-    l32i    a8,  sp, +XT_STK_A8
-    l32i    a9,  sp, +XT_STK_A9
-    l32i    a10, sp, +XT_STK_A10
-    l32i    a11, sp, +XT_STK_A11
-    l32i    a12, sp, +XT_STK_A12
-    l32i    a13, sp, +XT_STK_A13
-    l32i    a14, sp, +XT_STK_A14
-    l32i    a15, sp, +XT_STK_A15
+    RESTORE_FRAME sp
     ret
 .Lrestore_context_end:
     .size .Lrestore_context_start, .Lrestore_context_end
@@ -509,6 +510,7 @@ global_asm!(
     //    * A0 stored in EXCSAVE1
 
     .section .rwtext,\"ax\",@progbits
+    .literal sym_stack_monitor, __xtensa_lx_rt_stack_monitor
     .global __default_naked_exception
     .p2align 2
     .type __default_naked_exception,@function
@@ -518,7 +520,9 @@ __default_naked_exception:
 
     l32i    a6, sp, +XT_STK_EXCCAUSE  // put cause in a6 = a2 in callee
 
-    bnei    a6, EXCCAUSE_LEVEL1_INTERRUPT, .HandleException   // Handle exception elsewhere
+    beqi    a6, EXCCAUSE_LEVEL1_INTERRUPT, .HandleInterrupt
+    j       .HandleException          // Handle exception elsewhere
+.HandleInterrupt:
 
     movi    a0, (1 | PS_WOE | PS_UM)  // set PS.INTLEVEL, and run the handler in user mode
     wsr     a0, PS
@@ -528,7 +532,47 @@ __default_naked_exception:
     call4   __level_1_interrupt       // call handler <= actual call!
 
 .RestoreContext:
-    RESTORE_CONTEXT 1
+    // PS first: its EXCM keeps levels up to EXCMLEVEL masked until `rfe`, so
+    // nothing runs between the SP load and the monitor's new bounds. From here
+    // the frame is addressed through A0, which is restored last.
+    l32i    a2, sp, +XT_STK_PS
+    wsr     a2, PS
+    l32i    a2, sp, +XT_STK_PC
+    wsr     a2, EPC1
+    rsync
+    mov     a0, sp
+
+    l32r    a2, sym_stack_monitor     // this core's monitor block, if linked
+    beqz    a2, .Lload_sp
+    rsr     a3, PRID
+    extui   a3, a3, 13, 1
+    slli    a3, a3, {stride}
+    add     a2, a2, a3
+    l32i    a3, a2, {armed}
+    beqz    a3, .Lload_sp
+    l32i    a3, a2, {montr_ena}       // stop, and set the bounds of the stack
+    l32i    a4, a2, {montr_stopped}   // the SP load enters
+    s32i    a4, a3, 0
+    l32i    a4, a2, {sp_min}
+    l32i    a5, a2, {next_min}
+    s32i    a5, a4, 0
+    l32i    a4, a2, {sp_max}
+    l32i    a5, a2, {next_max}
+    s32i    a5, a4, 0
+    memw
+    l32i    a1, a0, +XT_STK_A1
+    l32i    a4, a2, {intr_clr}        // drop a latch the switch raised, restart
+    l32i    a5, a2, {clear_bits}
+    s32i    a5, a4, 0
+    l32i    a4, a2, {montr_running}
+    s32i    a4, a3, 0
+    memw
+    j       .Lrestore_frame
+.Lload_sp:
+    l32i    a1, a0, +XT_STK_A1
+.Lrestore_frame:
+    RESTORE_FRAME a0
+    l32i    a0, a0, +XT_STK_A0
 
     rfe                               // PS.EXCM is cleared
 
@@ -691,7 +735,18 @@ __default_naked_level_7_interrupt:
     HANDLE_INTERRUPT_LEVEL 7
 .Ldefault_naked_level_7_interrupt_end:
     .size .Ldefault_naked_level_7_interrupt_start, .Ldefault_naked_level_7_interrupt_end
-"
+",
+    stride = const crate::stack_monitor::STRIDE_SHIFT,
+    armed = const crate::stack_monitor::ARMED,
+    montr_ena = const crate::stack_monitor::MONTR_ENA,
+    montr_stopped = const crate::stack_monitor::MONTR_STOPPED,
+    montr_running = const crate::stack_monitor::MONTR_RUNNING,
+    sp_min = const crate::stack_monitor::SP_MIN,
+    sp_max = const crate::stack_monitor::SP_MAX,
+    intr_clr = const crate::stack_monitor::INTR_CLR,
+    clear_bits = const crate::stack_monitor::CLEAR_BITS,
+    next_min = const crate::stack_monitor::NEXT_MIN,
+    next_max = const crate::stack_monitor::NEXT_MAX,
 );
 
 // Raw vector handlers
