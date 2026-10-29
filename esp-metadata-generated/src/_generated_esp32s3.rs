@@ -452,7 +452,7 @@ macro_rules! property {
         true
     };
     ("assist_debug.has_sp_monitor") => {
-        false
+        true
     };
     ("assist_debug.has_region_monitor") => {
         true
