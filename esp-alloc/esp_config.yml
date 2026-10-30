@@ -12,3 +12,18 @@ options:
           value:
             - "LLFF"
             - "TLSF"
+
+  - name: global_preference
+    description: "Where the global allocator (Rust's `Box`, `Vec`, `String`) looks
+      first. `Any`: every region, first fit in registration order. `External`:
+      external (PSRAM) regions first, then any region, so internal RAM is left to
+      what asks for it (`InternalMemory`, `malloc_internal`, DMA). C `malloc` is
+      unaffected either way."
+    default:
+      - value: '"Any"'
+    constraints:
+      - type:
+          validator: enumeration
+          value:
+            - "Any"
+            - "External"

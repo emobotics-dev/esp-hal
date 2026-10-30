@@ -697,8 +697,31 @@ impl EspHeap {
 }
 
 unsafe impl GlobalAlloc for EspHeap {
+    /// Any region, first fit in registration order; with `global-preference`
+    /// set to `External`, external regions first and any region after them.
+    /// C `malloc` and explicit [`MemoryCapability::Internal`] requests are
+    /// unaffected.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        unsafe { self.alloc_caps(EnumSet::empty(), layout) }
+        #[cfg(global_preference_external)]
+        {
+            let ptr = self.inner.with(|heap| unsafe {
+                let external = heap.alloc_caps(MemoryCapability::External.into(), layout);
+                if external.is_null() {
+                    heap.alloc_caps(EnumSet::empty(), layout)
+                } else {
+                    external
+                }
+            });
+            #[cfg(feature = "alloc-hooks")]
+            unsafe {
+                _esp_alloc_alloc(self, EnumSet::empty(), ptr.addr(), layout.size());
+            }
+            ptr
+        }
+        #[cfg(not(global_preference_external))]
+        unsafe {
+            self.alloc_caps(EnumSet::empty(), layout)
+        }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
