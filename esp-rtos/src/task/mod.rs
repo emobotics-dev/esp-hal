@@ -684,6 +684,12 @@ impl Task {
         unsafe {
             esp_hal::debugger::set_stack_watchpoint(self.stack_guard as usize);
         }
+        // Applied by the switch trampoline around its SP load.
+        #[cfg(all(riscv, assist_debug_has_sp_monitor, hw_task_overflow_detection))]
+        {
+            let (bottom, top) = self.stack_range();
+            esp_hal::stack_monitor::stage(bottom, top);
+        }
     }
 }
 

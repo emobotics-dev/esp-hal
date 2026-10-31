@@ -327,6 +327,14 @@ use crate::rtc_cntl::SocResetReason;
 #[inline]
 pub fn software_reset() -> ! {
     let _uart0_sclk_guard = ensure_uart0_sclk_enabled();
+    // Nothing may preempt a reset in progress. With the other core being
+    // reset below, any interrupt that core was due to service, or that its
+    // reset itself raises, would otherwise land here and the reset would
+    // never be requested. ESP-IDF's `esp_restart_noos` masks first too.
+    // SAFETY: never released; the system resets below.
+    let _ = unsafe { esp_sync::raw::RawLock::enter(&esp_sync::raw::SingleCoreInterruptLock) };
+    #[cfg(all(riscv, feature = "rt", assist_debug_has_sp_monitor))]
+    crate::stack_monitor::disarm_all();
     #[cfg(any(esp32p4, esp32s31))]
     crate::soc::cpu_control::pre_system_reset();
     crate::rom::software_reset()

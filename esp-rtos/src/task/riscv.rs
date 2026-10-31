@@ -181,6 +181,47 @@ pub(crate) fn setup_smp<const IRQ: u8>(irq: impl Instance<IRQ> + 'static) {
     setup_multitasking(irq);
 }
 
+#[cfg(all(assist_debug_has_sp_monitor, hw_task_overflow_detection))]
+use esp_hal::stack_monitor::{ESP_HAL_STACK_MONITOR as MONITOR, Monitor};
+
+/// Without an SP monitor, a block that is never armed: the trampoline's check
+/// falls through.
+#[cfg(not(all(assist_debug_has_sp_monitor, hw_task_overflow_detection)))]
+static MONITOR: [[u32; 16]; esp_hal::system::Cpu::COUNT] = [[0; 16]; esp_hal::system::Cpu::COUNT];
+
+#[cfg(all(assist_debug_has_sp_monitor, hw_task_overflow_detection))]
+mod monitor_offsets {
+    use super::Monitor;
+    pub(super) const STRIDE: usize = Monitor::STRIDE_SHIFT;
+    pub(super) const ARMED: usize = Monitor::ARMED;
+    pub(super) const MONTR_ENA: usize = Monitor::MONTR_ENA;
+    pub(super) const MONTR_STOPPED: usize = Monitor::MONTR_STOPPED;
+    pub(super) const MONTR_RUNNING: usize = Monitor::MONTR_RUNNING;
+    pub(super) const SP_MIN: usize = Monitor::SP_MIN;
+    pub(super) const SP_MAX: usize = Monitor::SP_MAX;
+    pub(super) const INTR_CLR: usize = Monitor::INTR_CLR;
+    pub(super) const CLEAR_BITS: usize = Monitor::CLEAR_BITS;
+    pub(super) const NEXT_MIN: usize = Monitor::NEXT_MIN;
+    pub(super) const NEXT_MAX: usize = Monitor::NEXT_MAX;
+}
+
+/// The fallback block is 64 bytes per core, word 0 the armed flag; nothing
+/// past it is read while that stays zero.
+#[cfg(not(all(assist_debug_has_sp_monitor, hw_task_overflow_detection)))]
+mod monitor_offsets {
+    pub(super) const STRIDE: usize = 6;
+    pub(super) const ARMED: usize = 0;
+    pub(super) const MONTR_ENA: usize = 0;
+    pub(super) const MONTR_STOPPED: usize = 0;
+    pub(super) const MONTR_RUNNING: usize = 0;
+    pub(super) const SP_MIN: usize = 0;
+    pub(super) const SP_MAX: usize = 0;
+    pub(super) const INTR_CLR: usize = 0;
+    pub(super) const CLEAR_BITS: usize = 0;
+    pub(super) const NEXT_MIN: usize = 0;
+    pub(super) const NEXT_MAX: usize = 0;
+}
+
 // We need to place this close to the trap handler for the jump to be resolved properly
 /// Task switch wrapper
 ///
@@ -332,7 +373,32 @@ unsafe extern "C" fn swint_handler_trampoline() {
         lw s11, 27*4(tp)
         lw gp, 28*4(tp)
         # TP will be restored last.
+        # The SP monitor guards the stack being entered: stop it, load the
+        # staged bounds, switch SP, then drop any latch and restart it.
+        la t2, {monitor}
+        csrr t3, mhartid
+        slli t3, t3, {stride}
+        add t2, t2, t3
+        lw t3, {armed}(t2)
+        beqz t3, 7f
+        lw t3, {montr_ena}(t2)
+        lw t4, {montr_stopped}(t2)
+        sw t4, 0(t3)
+        lw t4, {sp_min}(t2)
+        lw t5, {next_min}(t2)
+        sw t5, 0(t4)
+        lw t4, {sp_max}(t2)
+        lw t5, {next_max}(t2)
+        sw t5, 0(t4)
+7:
         lw sp, 30*4(tp)
+        beqz t3, 8f
+        lw t4, {intr_clr}(t2)
+        lw t5, {clear_bits}(t2)
+        sw t5, 0(t4)
+        lw t4, {montr_running}(t2)
+        sw t4, 0(t3)
+8:
 
         lw t1, 31*4(tp)
         csrw mepc, t1
@@ -367,6 +433,18 @@ unsafe extern "C" fn swint_handler_trampoline() {
         .cfi_endproc
         ",
         scheduler_interrupt_handler = sym swint_handler,
+        monitor = sym MONITOR,
+        stride = const monitor_offsets::STRIDE,
+        armed = const monitor_offsets::ARMED,
+        montr_ena = const monitor_offsets::MONTR_ENA,
+        montr_stopped = const monitor_offsets::MONTR_STOPPED,
+        montr_running = const monitor_offsets::MONTR_RUNNING,
+        sp_min = const monitor_offsets::SP_MIN,
+        sp_max = const monitor_offsets::SP_MAX,
+        intr_clr = const monitor_offsets::INTR_CLR,
+        clear_bits = const monitor_offsets::CLEAR_BITS,
+        next_min = const monitor_offsets::NEXT_MIN,
+        next_max = const monitor_offsets::NEXT_MAX,
     }
 }
 

@@ -147,6 +147,16 @@ where
             crate::debugger::set_stack_watchpoint(guard as usize);
         }
         crate::interrupt::init_vectoring();
+        #[cfg(all(feature = "rt", stack_guard_monitoring))]
+        {
+            let guard =
+                multi_core::APP_CORE_STACK_GUARD.load(core::sync::atomic::Ordering::Acquire);
+            let offset = esp_config::esp_config_int!(usize, "ESP_HAL_CONFIG_STACK_GUARD_OFFSET");
+            let top = multi_core::APP_CORE_STACK_TOP.load(core::sync::atomic::Ordering::Acquire);
+            if !guard.is_null() {
+                crate::stack_monitor::arm_current(guard as usize - offset, top as usize);
+            }
+        }
     }
 
     unsafe { multi_core::CpuControl::start_core1_run::<F>() }
