@@ -164,8 +164,11 @@ mod xtensa {
         static mut __stack_chk_guard: u32;
     }
 
+    // The section in the same block as the literals, as for `__pre_init`'s:
+    // rustc does not emit separate `global_asm!` items in source order.
     global_asm!(
         "
+        .section .text,\"ax\",@progbits
         .literal sym_init_persistent, {__init_persistent}
         .literal sym_xtensa_lx_rt_zero_fill, {_xtensa_lx_rt_zero_fill}
 

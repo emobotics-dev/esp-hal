@@ -18,7 +18,9 @@ use crate::cfg_global_asm;
 //
 // With the exception of XT_STK_TMP, the fields must be aligned with the
 // `Context` struct in context.rs
-global_asm!(
+// One item from the offsets and macros to the last handler that expands them:
+// rustc does not emit separate `global_asm!` items in source order.
+cfg_global_asm!(
     "
     .set XT_STK_PC,              0
     .set XT_STK_PS,              4
@@ -204,10 +206,7 @@ global_asm!(
     rfi \\level
 
     .endm
-    "
-);
-
-cfg_global_asm!(
+    ",
     "
     // Save processor state to stack.
     //
@@ -498,9 +497,6 @@ restore_context:
 .Lrestore_context_end:
     .size .Lrestore_context_start, .Lrestore_context_end
     ",
-);
-
-global_asm!(
     "
     // Handle Other Exceptions or Level 1 interrupt by storing full context and
     // then calling regular function
@@ -691,7 +687,7 @@ __default_naked_level_7_interrupt:
     HANDLE_INTERRUPT_LEVEL 7
 .Ldefault_naked_level_7_interrupt_end:
     .size .Ldefault_naked_level_7_interrupt_start, .Ldefault_naked_level_7_interrupt_end
-"
+",
 );
 
 // Raw vector handlers
