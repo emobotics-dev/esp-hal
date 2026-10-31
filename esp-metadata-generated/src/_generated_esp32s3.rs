@@ -503,7 +503,7 @@ macro_rules! property {
         1070530560
     };
     ("assist_debug.has_sp_monitor") => {
-        false
+        true
     };
     ("assist_debug.has_region_monitor") => {
         true

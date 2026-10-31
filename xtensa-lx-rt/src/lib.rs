@@ -14,6 +14,7 @@ pub use xtensa_lx;
 
 pub mod exception;
 pub mod interrupt;
+pub mod stack_monitor;
 
 #[doc(hidden)]
 #[unsafe(no_mangle)]
@@ -256,6 +257,10 @@ macro_rules! cfg_global_asm {
     };
     {@inner, [$($x:tt)*], $asm:literal, $($rest:tt)*} => {
         cfg_global_asm!{@inner, [$($x)* $asm,], $($rest)*}
+    };
+    // The operands, after the template.
+    {@inner, [$($x:tt)*], $name:ident = $($operands:tt)*} => {
+        global_asm!{$($x)* $name = $($operands)*}
     };
     {$($asms:tt)*} => {
         cfg_global_asm!{@inner, [], $($asms)*}

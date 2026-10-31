@@ -332,7 +332,7 @@ pub fn software_reset() -> ! {
     // never be requested. ESP-IDF's `esp_restart_noos` masks first too.
     // SAFETY: never released; the system resets below.
     let _ = unsafe { esp_sync::raw::RawLock::enter(&esp_sync::raw::SingleCoreInterruptLock) };
-    #[cfg(all(riscv, feature = "rt", assist_debug_has_sp_monitor))]
+    #[cfg(all(feature = "rt", assist_debug_has_sp_monitor))]
     crate::stack_monitor::disarm_all();
     #[cfg(any(esp32h4, esp32p4, esp32s31))]
     crate::soc::cpu_control::pre_system_reset();

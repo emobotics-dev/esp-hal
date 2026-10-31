@@ -338,7 +338,7 @@ mod exception_handler;
 pub mod efuse;
 pub mod interrupt;
 
-#[cfg(all(riscv, feature = "rt", assist_debug_has_sp_monitor))]
+#[cfg(all(feature = "rt", assist_debug_has_sp_monitor))]
 #[doc(hidden)]
 pub mod stack_monitor;
 

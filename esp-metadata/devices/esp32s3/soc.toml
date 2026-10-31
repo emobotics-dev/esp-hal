@@ -137,6 +137,7 @@ key_length = { options = [
 
 [device.assist_debug]
 support_status = "partial"
+has_sp_monitor = true
 has_region_monitor = true
 
 [device.dma]
