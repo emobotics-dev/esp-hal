@@ -511,6 +511,12 @@ macro_rules! property {
     ("sleep.deep_sleep_needs_gpio_isolation") => {
         false
     };
+    ("assist_debug.has_sp_monitor") => {
+        true
+    };
+    ("assist_debug.has_region_monitor") => {
+        true
+    };
     ("dma.mem2mem_requires_peripheral") => {
         false
     };

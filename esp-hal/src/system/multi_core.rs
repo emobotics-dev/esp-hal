@@ -448,6 +448,17 @@ where
         crate::interrupt::init_vectoring();
         #[cfg(feature = "rt")]
         crate::interrupt::ipc::install_app();
+        // The SP monitor guards core 1's stack from here: the guard word, less
+        // the configured offset, up to the top.
+        #[cfg(all(feature = "rt", stack_guard_monitoring, assist_debug_has_sp_monitor))]
+        {
+            let guard = APP_CORE_STACK_GUARD.load(Ordering::Acquire);
+            let offset = esp_config::esp_config_int!(usize, "ESP_HAL_CONFIG_STACK_GUARD_OFFSET");
+            let top = APP_CORE_STACK_TOP.load(Ordering::Acquire);
+            if !guard.is_null() {
+                crate::stack_monitor::arm_current(guard as usize - offset, top as usize);
+            }
+        }
     }
 
     enable_app_core_interrupts();

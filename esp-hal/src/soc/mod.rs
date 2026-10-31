@@ -351,6 +351,18 @@ pub(crate) fn enable_main_stack_guard_monitoring() {
         let guard_addr = core::ptr::addr_of_mut!(__stack_chk_guard) as *mut _ as u32;
         crate::debugger::set_stack_watchpoint(guard_addr as usize);
     }
+
+    #[cfg(all(riscv, assist_debug_has_sp_monitor))]
+    unsafe {
+        unsafe extern "C" {
+            static _stack_end_cpu0: u32;
+            static _stack_start_cpu0: u32;
+        }
+        crate::stack_monitor::arm_current(
+            (&raw const _stack_end_cpu0) as usize,
+            (&raw const _stack_start_cpu0) as usize,
+        );
+    }
 }
 
 #[cfg(all(riscv, write_vec_table_monitoring))]
