@@ -304,7 +304,7 @@ pub(crate) fn enable_main_stack_guard_monitoring() {
         crate::debugger::set_stack_watchpoint(guard_addr as usize);
     }
 
-    #[cfg(all(riscv, assist_debug_has_sp_monitor))]
+    #[cfg(assist_debug_has_sp_monitor)]
     unsafe {
         unsafe extern "C" {
             static _stack_end_cpu0: u32;

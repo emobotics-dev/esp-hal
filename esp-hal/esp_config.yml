@@ -93,6 +93,8 @@ options:
       monitor, on chips that have one: the room the overflow report's trap
       frame needs. Needs to be a multiple of 16.
     default:
+      - value: 1024
+        if: "esp32s3"
       - value: 512
     constraints:
       - type:

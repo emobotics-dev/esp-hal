@@ -1,3 +1,7 @@
+/* The SP monitor block xtensa-lx-rt's level-1 exit reads (`stack_monitor`):
+   absent unless a driver defines it. */
+PROVIDE(__xtensa_lx_rt_stack_monitor = 0);
+
 /* exception vector for the ESP32, requiring high priority interrupts and register window support */
 
 /* high level exception/interrupt routines, which can be override with Rust functions */

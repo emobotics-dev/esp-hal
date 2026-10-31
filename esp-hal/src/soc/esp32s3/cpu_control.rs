@@ -139,6 +139,17 @@ where
     // Do not call setup_interrupts as that would disable peripheral interrupts, too.
     unsafe { crate::interrupt::init_vectoring() };
 
+    // SP is on the new stack since `set_stack_pointer`.
+    #[cfg(all(feature = "rt", stack_guard_monitoring))]
+    {
+        let guard = APP_CORE_STACK_GUARD.load(Ordering::Acquire);
+        let offset = esp_config::esp_config_int!(usize, "ESP_HAL_CONFIG_STACK_GUARD_OFFSET");
+        let top = APP_CORE_STACK_TOP.load(Ordering::Acquire);
+        if !guard.is_null() {
+            unsafe { crate::stack_monitor::arm_current(guard as usize - offset, top as usize) };
+        }
+    }
+
     // Trampoline to run from the new stack.
     // start_core1_run should _NEVER_ be inlined
     // as we rely on the function call to use
