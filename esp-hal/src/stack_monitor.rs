@@ -338,7 +338,8 @@ fn on_spill(frame: &mut xtensa_lx_rt::exception::Context) {
     let top = unsafe { addr_of_mut!(EMERGENCY_STACKS[cpu as usize]).add(1) } as usize;
     // Forget every window but this one, so no frame of the overflowed stack is
     // ever spilled, then call the report on the emergency stack. `call4` hands
-    // a6..a10 over as its a2..a6. a11 is scratch: nothing returns here.
+    // a6..a10 over as its a2..a6. a11 is scratch: nothing returns here. a7 is
+    // the frame pointer, no operand, so it is loaded last, on the new stack.
     unsafe {
         core::arch::asm!(
             "rsr.windowbase a11",
@@ -348,11 +349,12 @@ fn on_spill(frame: &mut xtensa_lx_rt::exception::Context) {
             "wsr.windowstart a11",
             "rsync",
             "mov a1, {top}",
+            "mov a7, {sp}",
             "callx4 {f}",
             top = in(reg) top,
+            sp = in(reg) sp,
             f = in(reg) overflowed as *const () as usize,
             in("a6") pc,
-            in("a7") sp,
             in("a8") min,
             in("a9") max,
             in("a10") u32::from(sp < min),
