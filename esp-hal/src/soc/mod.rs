@@ -126,8 +126,11 @@ mod xtensa {
         static mut __stack_chk_guard: u32;
     }
 
+    // Flash, with `__post_init`, stated here: blocks reach the assembler in no
+    // guaranteed order, so the section current before it is anyone's.
     global_asm!(
         "
+        .section .text,\"ax\",@progbits
         .literal sym_init_persistent, {__init_persistent}
         .literal sym_xtensa_lx_rt_zero_fill, {_xtensa_lx_rt_zero_fill}
 
@@ -192,9 +195,11 @@ mod xtensa {
     }
 
     #[cfg(esp32s3)]
-    global_asm!(".section .rwtext,\"ax\",@progbits");
+    // The section in the same block as the literals: blocks reach the
+    // assembler in no guaranteed order.
     global_asm!(
         "
+        .section .rwtext,\"ax\",@progbits
         .literal sym_stack_chk_guard, {__stack_chk_guard}
         .literal stack_guard_value, {stack_guard_value}
         .literal sym_esp32_init, {__esp32_init}
