@@ -1479,6 +1479,13 @@ impl InterfaceType {
             }
             #[cfg(wifi_softap_support)]
             InterfaceType::AccessPoint => {
+                // The driver's address, which a configured BSSID replaces.
+                let mut mac = [0u8; 6];
+                if unsafe { esp_wifi_get_mac(wifi_interface_t_WIFI_IF_AP, mac.as_mut_ptr()) }
+                    == include::ESP_OK as i32
+                {
+                    return mac;
+                }
                 esp_hal::efuse::interface_mac_address(InterfaceMacAddress::AccessPoint)
             }
         };
@@ -3695,6 +3702,10 @@ ignored."
                 gtk_rekey_interval: 0,
             },
         };
+
+        if let Some(bssid) = config.bssid {
+            esp_wifi_result!(unsafe { esp_wifi_set_mac(wifi_interface_t_WIFI_IF_AP, bssid.as_ptr()) })?;
+        }
 
         unsafe {
             cfg.ap.ssid[0..(config.ssid.len())].copy_from_slice(config.ssid.as_bytes());

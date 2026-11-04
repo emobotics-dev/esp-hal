@@ -37,6 +37,18 @@ pub struct AccessPointConfig {
     /// Time to force deauth the station if the Soft-AccessPoint doesn't receive any data.
     #[builder_lite(unstable)]
     pub(crate) beacon_timeout: u16,
+    /// The access point's BSSID, its interface MAC; the efuse address when `None`.
+    ///
+    /// A station that still holds an association to a previous start of this
+    /// access point notices the restart only by beacon loss, and none happens
+    /// while the BSSID stays the same: the access point does not deauthenticate
+    /// a station it does not know. A fresh locally administered BSSID per start
+    /// ends such an association within the station's beacon timeout.
+    ///
+    /// Applied while the access point is stopped (the first configuration); the
+    /// interface's [`mac_address`](super::Interface::mac_address) reports it.
+    #[builder_lite(unstable)]
+    pub(crate) bssid: Option<[u8; 6]>,
 }
 
 impl AccessPointConfig {
@@ -59,6 +71,13 @@ impl AccessPointConfig {
             return Err(WifiError::InvalidArguments);
         }
 
+        if let Some(bssid) = self.bssid
+            && bssid[0] & 0x01 != 0
+        {
+            warn!("Access point BSSID is a multicast address.");
+            return Err(WifiError::InvalidArguments);
+        }
+
         Ok(())
     }
 }
@@ -75,6 +94,7 @@ impl Default for AccessPointConfig {
             max_connections: 255,
             dtim_period: 2,
             beacon_timeout: 300,
+            bssid: None,
         }
     }
 }
