@@ -1,18 +1,17 @@
 INCLUDE exception.x
 
 SECTIONS {
-  /* READONLY, not NOLOAD: a NOLOAD output section gets SHF_WRITE, and this one
-   * shares a LOAD segment with .text (SHF_EXECINSTR), so the segment came out
-   * RWX — which ld reports as "has a LOAD segment with RWX permissions". That
-   * warning survives a -D warnings build, because the `linker_messages` lint
-   * documents that it ignores it.
+  /* NOLOAD, for lld, which links the S3 since the esp 1.100 toolchain carries no GNU
+   * ld; lld does not parse GNU's READONLY. Under lld this section comes out SHT_NOBITS
+   * with SHF_ALLOC only, in a read-only LOAD segment of its own, and .text stays R E —
+   * measured on the CoreS3 evcc.
    *
-   * READONLY keeps the section SHT_NOBITS here (it has no content statements,
-   * only a `.` advance), so the image does not grow. Measured, not assumed —
-   * the combined `READONLY (TYPE = SHT_NOBITS)` form parses but silently drops
-   * the readonly half, and plain `TYPE =` does too; only bare READONLY works.
+   * Under GNU ld, NOLOAD gets SHF_WRITE, the section shares .text's segment, and ld warns
+   * that the segment is RWX: why this said READONLY while the S3 linked with GNU ld. A
+   * build still linking with it sees that warning again; `-D warnings` does not catch it
+   * (the `linker_messages` lint ignores it), and the image is unchanged.
    */
-  .rotext_dummy (READONLY) :
+  .rotext_dummy (NOLOAD) :
   {
     /* This dummy section represents the .rodata section within ROTEXT.
     * Since the same physical memory is mapped to both DROM and IROM,
