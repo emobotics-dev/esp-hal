@@ -146,6 +146,61 @@ fn monitor(cpu: Cpu) -> *mut Monitor {
     unsafe { addr_of_mut!(ESP_HAL_STACK_MONITOR[cpu as usize]) }
 }
 
+/// The CPU interrupt each core mapped [`Interrupt::ASSIST_DEBUG`] to before it stood aside,
+/// or [`TAKING`] while it takes the interrupt.
+static ASIDE: [portable_atomic::AtomicU32; Cpu::COUNT] =
+    [const { portable_atomic::AtomicU32::new(TAKING) }; Cpu::COUNT];
+const TAKING: u32 = u32::MAX;
+
+fn latched(cpu: Cpu) -> bool {
+    let raw = ASSIST_DEBUG::regs().cpu(cpu as usize).intr_raw().read();
+    raw.sp_spill_min_raw().bit() || raw.sp_spill_max_raw().bit()
+}
+
+fn mapped(cpu: Cpu) -> u32 {
+    match cpu {
+        Cpu::ProCpu => crate::peripherals::INTERRUPT_CORE0::regs()
+            .core_0_intr_map(Interrupt::ASSIST_DEBUG as usize)
+            .read()
+            .map()
+            .bits() as u32,
+        #[cfg(multi_core)]
+        Cpu::AppCpu => crate::peripherals::INTERRUPT_CORE1::regs()
+            .core_1_intr_map(Interrupt::ASSIST_DEBUG as usize)
+            .read()
+            .map()
+            .bits() as u32,
+    }
+}
+
+/// Stop taking the shared interrupt for another core's latch. Only its owner clears a latch,
+/// and an owner with its interrupts masked cannot: taking the raised line again and again
+/// starves this core, which deadlocks an owner that waits for it masked (a flash write's
+/// `ipc_stall`). The owner maps it back once its latch is gone ([`readmit_others`]).
+fn stand_aside(cpu: Cpu) {
+    let previous = mapped(cpu);
+    crate::interrupt::disable(cpu, Interrupt::ASSIST_DEBUG);
+    ASIDE[cpu as usize].store(previous, portable_atomic::Ordering::SeqCst);
+    // The owner may have cleared its latch before the store and found no one to readmit.
+    if !Cpu::all().any(|other| other != cpu && latched(other)) {
+        readmit(cpu);
+    }
+}
+
+fn readmit(cpu: Cpu) {
+    let previous = ASIDE[cpu as usize].swap(TAKING, portable_atomic::Ordering::SeqCst);
+    if previous != TAKING {
+        crate::interrupt::map_raw(cpu, Interrupt::ASSIST_DEBUG, previous);
+    }
+}
+
+/// After `cpu` cleared its latch: every core that stood aside for it takes the interrupt again.
+fn readmit_others(cpu: Cpu) {
+    for other in Cpu::all().filter(|&other| other != cpu) {
+        readmit(other);
+    }
+}
+
 /// The monitor's bounds for a stack spanning `bottom..top`.
 pub const fn bounds(bottom: usize, top: usize) -> (u32, u32) {
     ((bottom + MARGIN) as u32, top as u32)
@@ -229,6 +284,9 @@ pub fn disarm_all() {
             }
         }
     }
+    for cpu in Cpu::all() {
+        readmit(cpu);
+    }
 }
 
 /// Stage `bottom..top` as the stack the current core's next context restore
@@ -273,6 +331,7 @@ extern "C" fn on_spill() {
     // A spill on another core is that core's to report: reporting it here would
     // name the wrong core and stack, and two cores panicking at once is not loud.
     if !raw.sp_spill_min_raw().bit() && !raw.sp_spill_max_raw().bit() {
+        stand_aside(cpu);
         return;
     }
     let m = monitor(cpu);
@@ -288,6 +347,7 @@ extern "C" fn on_spill() {
         (*m).armed = 0;
         (*m).intr_clr.write_volatile((*m).clear_bits);
     }
+    readmit_others(cpu);
     let sp: usize;
     unsafe { core::arch::asm!("mv {0}, sp", out(reg) sp) };
     // SAFETY: this core's emergency stack, used once: `overflowed` never returns.
@@ -316,6 +376,7 @@ fn on_spill(frame: &mut xtensa_lx_rt::exception::Context) {
     let raw = regs.intr_raw().read();
     // Shared by both cores, as on RISC-V: another core's spill is its own.
     if !raw.sp_spill_min_raw().bit() && !raw.sp_spill_max_raw().bit() {
+        stand_aside(cpu);
         return;
     }
     let m = monitor(cpu);
@@ -325,6 +386,7 @@ fn on_spill(frame: &mut xtensa_lx_rt::exception::Context) {
     if (min..=max).contains(&sp) {
         // SAFETY: this core's block, filled by `arm_current`.
         unsafe { (*m).intr_clr.write_volatile((*m).clear_bits) };
+        readmit_others(cpu);
         SPURIOUS.fetch_add(1, portable_atomic::Ordering::Relaxed);
         return;
     }
@@ -334,6 +396,7 @@ fn on_spill(frame: &mut xtensa_lx_rt::exception::Context) {
         (*m).armed = 0;
         (*m).intr_clr.write_volatile((*m).clear_bits);
     }
+    readmit_others(cpu);
     // SAFETY: this core's emergency stack, used once: `overflowed` never returns.
     let top = unsafe { addr_of_mut!(EMERGENCY_STACKS[cpu as usize]).add(1) } as usize;
     // Forget every window but this one, so no frame of the overflowed stack is
